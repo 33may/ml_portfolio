@@ -138,7 +138,7 @@ class ConvolutionalLayer:
 
                 input_patch = self.last_X[:, y:y + self.filter_size, x:x + self.filter_size, :]
 
-                input_patch_flat = input_patch.reshape(batch_size, self.in_channels * self.filter_size, self.filter_size)
+                input_patch_flat = input_patch.reshape(batch_size, self.in_channels * self.filter_size * self.filter_size)
 
 
                 # d_x -> d_out + weights
@@ -147,7 +147,7 @@ class ConvolutionalLayer:
 
                 d_input_patch = d_input_flat.reshape(batch_size, self.filter_size, self.filter_size, in_channels)
 
-                result[:, y:y+self.filter_size, x:x+self.filter_size, :] = d_input_patch
+                result[:, y:y+self.filter_size, x:x+self.filter_size, :] += d_input_patch
 
 
                 # d_w -> d_out + inputs
@@ -200,15 +200,16 @@ class MaxPoolingLayer:
 
 
     def backward(self, d_out):
-        batch_size, out_height, out_width, channels = d_out.shape
-
         batch_size, height, width, channels = self.X.shape
 
         d_input = np.zeros_like(self.X)
 
+        out_width = (width - self.pool_size) // self.stride + 1
+        out_height = (height - self.pool_size) // self.stride + 1
+
         for y in range(out_height):
             for x in range(out_width):
-                input_patch = self.X[:, y:y + self.pool_size, x:x + self.pool_size, :]
+                input_patch = self.X[:, y * self.stride:y * self.stride +self.pool_size, x * self.stride:x * self.stride +self.pool_size, :]
 
                 input_patch_reshaped = input_patch.reshape(batch_size, -1, channels)
 
@@ -222,7 +223,7 @@ class MaxPoolingLayer:
                 batch_idx = np.arange(batch_size)[:, None]
                 ch_idx = np.arange(channels)
 
-                d_input[batch_idx, col_idx_global, row_idx_global, ch_idx] += d_out[:, y, x, :]
+                d_input[batch_idx, row_idx_global, col_idx_global, ch_idx] += d_out[:, y, x, :]
 
         return d_input
 
