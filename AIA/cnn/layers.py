@@ -203,8 +203,11 @@ def im2col(X, filter_size, stride):
     y_indices = y_starts[:, :, None, None] + dy  # [H_out, W_out, filter_size, filter_size]
     x_indices = x_starts[:, :, None, None] + dx  # [H_out, W_out, filter_size, filter_size]
 
-    batch_indices = np.arange(batch_size)[:, None, None, None, None]  # [N, 1, 1, 1, 1]
-    channel_indices = np.arange(ch)[None, None, None, None, :]  # [1, 1, 1, 1, C]
+    y_indices = y_indices[np.newaxis, :, :, :, :, np.newaxis]
+    x_indices = x_indices[np.newaxis, :, :, :, :, np.newaxis]
+
+    batch_indices = np.arange(batch_size)[:, None, None, None, None, None]  # [N, 1, 1, 1, 1]
+    channel_indices = np.arange(ch)[None, None, None, None, None, :]  # [1, 1, 1, 1, C]
 
     patches = X[
         batch_indices,
@@ -212,12 +215,6 @@ def im2col(X, filter_size, stride):
         x_indices,
         channel_indices
     ]  # [N, H_out, W_out, k, k, C]
-
-    if patches.ndim <= 5:
-        if ch == 1:
-            patches = patches[..., None]
-        if batch_size == 1:
-            patches = patches[..., None]
 
     im2col_matrix = patches.reshape(batch_size * h_out * w_out, filter_size * filter_size * ch)
 
@@ -252,12 +249,12 @@ class ConvolutionalLayerGPU:
         # pad the input tensor
         X = apply_padding(X, self.padding) if self.padding > 0 else X
 
-        # save last input for backward pass
-        self.last_X = X
-
         input_matrix = im2col(X, self.filter_size, 1) # [batch_size * height_out * width_out, filter_size * filter_size * in_channels]
 
-        weights = self.W.value.reshape(self.in_channels * self.filter_size * self.filter_size, self.out_channels) # [in_channels * filter_size * filter_size, out_channels}
+        # save last input for backward pass
+        self.last_X = input_matrix
+
+        weights = self.W.value.reshape(self.in_channels * self.filter_size * self.filter_size, self.out_channels) # [in_channels * filter_size * filter_size, out_channels]
 
         result = input_matrix @ weights + self.B.value # [batch_size * height_out * width_out, out_channels]
 
@@ -272,40 +269,26 @@ class ConvolutionalLayerGPU:
 
         result = np.zeros_like(self.last_X)
 
-        weights = self.W.value.reshape(self.in_channels * self.filter_size * self.filter_size, self.out_channels)
+        weights = self.W.value.reshape(self.in_channels * self.filter_size * self.filter_size, self.out_channels) # [in_channels * filter_size * filter_size, out_channels]
 
-        for y in range(out_height):
-            for x in range(out_width):
-                # take the gradient patch (batch_size, out_channels)
-                gradient_patch = d_out[:, y, x, :]
+        reshaped_d_out = d_out.reshape(batch_size * out_height * out_width, self.out_channels) # [batch_size * out_height * out_width, out_channels]
 
-                input_patch = self.last_X[:, y:y + self.filter_size, x:x + self.filter_size, :]
+        # d_x -> d_out + weights
 
-                input_patch_flat = input_patch.reshape(batch_size, self.in_channels * self.filter_size * self.filter_size)
+        backprop_matrix = reshaped_d_out @ weights.T # [batch_size * out_height * out_width, in_channels * filter_size * filter_size]
 
+        # d_w -> d_out + inputs
 
-                # d_x -> d_out + weights
+        d_w = self.last_X.T @ reshaped_d_out # [in_channels * filter_size * filter_size, out_channels]
 
-                d_input_flat = gradient_patch @ weights.T
+        self.W.grad += d_w
 
-                d_input_patch = d_input_flat.reshape(batch_size, self.filter_size, self.filter_size, in_channels)
+        # d_b -> d_out
 
-                result[:, y:y+self.filter_size, x:x+self.filter_size, :] += d_input_patch
+        d_b = np.sum(gradient_patch, axis=0)
 
+        self.B.grad += d_b
 
-                # d_w -> d_out + inputs
-                d_flat_w = input_patch_flat.T @ gradient_patch
-
-                d_w = d_flat_w.reshape(self.filter_size, self.filter_size, self.in_channels, self.out_channels)
-
-                self.W.grad += d_w
-
-
-                # d_b -> d_out
-
-                d_b = np.sum(gradient_patch, axis=0)
-
-                self.B.grad += d_b
 
 
         return result[:, self.padding:-self.padding, self.padding:-self.padding, :] if self.padding > 0 else result
