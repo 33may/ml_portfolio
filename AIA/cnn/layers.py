@@ -275,7 +275,10 @@ class ConvolutionalLayerGPU:
 
         # d_x -> d_out + weights
 
-        backprop_matrix = reshaped_d_out @ weights.T # [batch_size * out_height * out_width, in_channels * filter_size * filter_size]
+        backprop_matrix = reshaped_d_out @ weights.T # [batch_size * out_height * out_width, filter_size * filter_size * in_channels]
+
+
+
 
         # d_w -> d_out + inputs
 

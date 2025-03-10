@@ -48,7 +48,7 @@ def im2col(X, filter_size, stride):
     return im2col_matrix
 
 
-def col2im(d_out, filter_size, stride):
+def col2im(dx_patches, filter_size, stride):
     """
 
     Params:
@@ -57,7 +57,7 @@ def col2im(d_out, filter_size, stride):
     Returns:
 
     """
-    # get the input tensor shape
+    # dx_patches [batch_size * out_height * out_width, filter_size * filter_size * in_channels]
 
 
 
