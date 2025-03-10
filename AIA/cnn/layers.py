@@ -111,10 +111,7 @@ class ConvolutionalLayer:
                 patch_flat = patch.reshape(batch_size, self.in_channels * self.filter_size * self.filter_size)
 
                 # convolution operation
-                res = patch_flat @ weights
-
-                # add bias to result
-                res += self.B.value
+                res = patch_flat @ weights + self.B.value
 
                 # add pixels to result tensor
                 result[:, y, x, :] = res
@@ -172,6 +169,27 @@ class ConvolutionalLayer:
         return { 'W': self.W, 'B': self.B }
 
 
+
+def im2col_idx(x_shape, filter_size, stride):
+    batch_size, h, w, ch = x_shape
+
+    y_start = np.arange(0, h - filter_size + 1, stride)
+    x_start = np.arange(0, w - filter_size + 1, stride)
+
+    # grid of initial coordinates
+    y_starts, x_starts = np.meshgrid(x_start, y_start, indexing='ij')  # [H_out, W_out]
+
+    dy, dx = np.mgrid[0:filter_size, 0:filter_size]  # [filter_size, filter_size]
+
+    y_indices = y_starts[:, :, None, None] + dy  # [H_out, W_out, filter_size, filter_size]
+    x_indices = x_starts[:, :, None, None] + dx  # [H_out, W_out, filter_size, filter_size]
+
+    batch_indices = np.arange(batch_size)[:, None, None, None, None, None]  # [N, 1, 1, 1, 1]
+    channel_indices = np.arange(ch)[None, None, None, None, None, :]  # [1, 1, 1, 1, C]
+
+    return batch_indices, y_indices, x_indices, channel_indices
+
+
 def im2col(X, filter_size, stride):
     """
     Convert images into matrix suitable to apply GPU Convolution operations.
@@ -187,27 +205,13 @@ def im2col(X, filter_size, stride):
     # get the input tensor shape
     batch_size, h, w, ch = X.shape
 
-    # compute the x,y coordinates of each possible patch combination start
-    y_start = np.arange(0, h - filter_size + 1, stride)
-    x_start = np.arange(0, w - filter_size + 1, stride)
-
-    # compute the shape of the matrix after
     h_out = (h - filter_size) // stride + 1
     w_out = (w - filter_size) // stride + 1
 
-    # grid of initial coordinates
-    y_starts, x_starts  = np.meshgrid(x_start, y_start, indexing='ij') # [H_out, W_out]
-
-    dy, dx = np.mgrid[0:filter_size, 0:filter_size] # [filter_size, filter_size]
-
-    y_indices = y_starts[:, :, None, None] + dy  # [H_out, W_out, filter_size, filter_size]
-    x_indices = x_starts[:, :, None, None] + dx  # [H_out, W_out, filter_size, filter_size]
+    batch_indices, y_indices, x_indices, channel_indices = im2col_idx(X.shape, filter_size, stride)
 
     y_indices = y_indices[np.newaxis, :, :, :, :, np.newaxis]
     x_indices = x_indices[np.newaxis, :, :, :, :, np.newaxis]
-
-    batch_indices = np.arange(batch_size)[:, None, None, None, None, None]  # [N, 1, 1, 1, 1]
-    channel_indices = np.arange(ch)[None, None, None, None, None, :]  # [1, 1, 1, 1, C]
 
     patches = X[
         batch_indices,
@@ -219,6 +223,33 @@ def im2col(X, filter_size, stride):
     im2col_matrix = patches.reshape(batch_size * h_out * w_out, filter_size * filter_size * ch)
 
     return im2col_matrix
+
+
+def col2im(dx_patches, x_shape, filter_size, stride):
+    batch_size, h_in, w_in, in_ch = x_shape
+
+    result = np.zeros((batch_size, h_in, w_in, in_ch))
+
+    batch_idx, y_idx, x_idx, chanel_idx = im2col_idx(x_shape, filter_size, stride)
+
+    y_indices = y_idx[np.newaxis, :, :, :, :, np.newaxis]
+    x_indices = x_idx[np.newaxis, :, :, :, :, np.newaxis]
+
+    batch_idx = batch_idx + np.zeros_like(y_indices) + np.zeros_like(chanel_idx)
+    chanel_idx = chanel_idx + np.zeros_like(y_indices) + np.zeros_like(batch_idx)
+    y_idx = y_indices + np.zeros_like(chanel_idx) + np.zeros_like(batch_idx)
+    x_idx = x_indices + np.zeros_like(chanel_idx) + np.zeros_like(batch_idx)
+
+    batch_idx_flat = batch_idx.ravel()
+    chanel_idx_flat = chanel_idx.ravel()
+    y_idx_flat = y_idx.ravel()
+    x_idx_flat = x_idx.ravel()
+
+    dx_patches_flat = dx_patches.ravel()
+
+    np.add.at(result, (batch_idx_flat, y_idx_flat, x_idx_flat, chanel_idx_flat), dx_patches_flat)
+
+    return result
 
 
 class ConvolutionalLayerGPU:
@@ -236,11 +267,13 @@ class ConvolutionalLayerGPU:
         self.padding = padding
 
         self.last_X = None
+        self.last_X_shape = None
 
 
     def forward(self, X):
         # get shape of the input tensor
         batch_size, height, width, in_channels = X.shape
+
 
         # compute shape of output tensor
         out_height = height - self.filter_size + 1 + 2 * self.padding
@@ -248,6 +281,8 @@ class ConvolutionalLayerGPU:
 
         # pad the input tensor
         X = apply_padding(X, self.padding) if self.padding > 0 else X
+
+        self.last_X_shape = X.shape
 
         input_matrix = im2col(X, self.filter_size, 1) # [batch_size * height_out * width_out, filter_size * filter_size * in_channels]
 
@@ -263,38 +298,29 @@ class ConvolutionalLayerGPU:
 
 
     def backward(self, d_out):
-        batch_size, height, width, in_channels = self.last_X.shape
+        batch_size, height, width, in_channels = self.last_X_shape
 
         _, out_height, out_width, out_channels = d_out.shape
-
-        result = np.zeros_like(self.last_X)
 
         weights = self.W.value.reshape(self.in_channels * self.filter_size * self.filter_size, self.out_channels) # [in_channels * filter_size * filter_size, out_channels]
 
         reshaped_d_out = d_out.reshape(batch_size * out_height * out_width, self.out_channels) # [batch_size * out_height * out_width, out_channels]
 
         # d_x -> d_out + weights
-
         backprop_matrix = reshaped_d_out @ weights.T # [batch_size * out_height * out_width, filter_size * filter_size * in_channels]
 
-
-
+        d_x = col2im(backprop_matrix, self.last_X_shape,  self.filter_size, 1)
 
         # d_w -> d_out + inputs
-
         d_w = self.last_X.T @ reshaped_d_out # [in_channels * filter_size * filter_size, out_channels]
-
+        d_w = d_w.reshape(self.filter_size , self.filter_size, self.in_channels, self.out_channels)
         self.W.grad += d_w
 
         # d_b -> d_out
+        d_b = np.sum(d_out, axis=(0, 1, 2))
+        self.B.grad = d_b
 
-        d_b = np.sum(gradient_patch, axis=0)
-
-        self.B.grad += d_b
-
-
-
-        return result[:, self.padding:-self.padding, self.padding:-self.padding, :] if self.padding > 0 else result
+        return d_x[:, self.padding:-self.padding, self.padding:-self.padding, :] if self.padding > 0 else d_x
 
 
     def params(self):
