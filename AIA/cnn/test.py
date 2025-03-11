@@ -113,14 +113,14 @@ def col2im(dx_patches, filter_size, stride):
 
 
 def col2im(dx_patches, x_shape, filter_size, stride):
-    batch_size, h_in, w_in, in_ch = x_shape
+    batch_size, in_ch, h_in, w_in = x_shape
 
-    result = np.zeros((batch_size, h_in, w_in, in_ch))
+    result = np.zeros((batch_size, in_ch, h_in, w_in))
 
     batch_idx, y_idx, x_idx, chanel_idx = im2col_idx(x_shape, filter_size, stride)
 
-    y_indices = y_idx[np.newaxis, :, :, :, :, np.newaxis]
-    x_indices = x_idx[np.newaxis, :, :, :, :, np.newaxis]
+    y_indices = y_idx[np.newaxis, :, :, np.newaxis, :, :]
+    x_indices = x_idx[np.newaxis, :, :, np.newaxis, :, :]
 
     batch_idx = batch_idx + np.zeros_like(y_indices) + np.zeros_like(chanel_idx)
     chanel_idx = chanel_idx + np.zeros_like(y_indices) + np.zeros_like(batch_idx)
