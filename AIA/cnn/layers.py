@@ -282,8 +282,6 @@ class ConvolutionalLayerGPU:
         # pad the input tensor
         X = apply_padding(X, self.padding) if self.padding > 0 else X
 
-        self.last_X_shape = X.shape
-
         input_matrix = im2col(X, self.filter_size, 1) # [batch_size * height_out * width_out, filter_size * filter_size * in_channels]
 
         # save last input for backward pass
@@ -298,9 +296,11 @@ class ConvolutionalLayerGPU:
 
 
     def backward(self, d_out):
-        batch_size, height, width, in_channels = self.last_X_shape
+        batch_size, height, width, in_channels = self.last_X.shape
 
         _, out_height, out_width, out_channels = d_out.shape
+
+        result = np.zeros_like(self.last_X)
 
         weights = self.W.value.reshape(self.in_channels * self.filter_size * self.filter_size, self.out_channels) # [in_channels * filter_size * filter_size, out_channels]
 
@@ -313,14 +313,18 @@ class ConvolutionalLayerGPU:
 
         # d_w -> d_out + inputs
         d_w = self.last_X.T @ reshaped_d_out # [in_channels * filter_size * filter_size, out_channels]
-        d_w = d_w.reshape(self.filter_size , self.filter_size, self.in_channels, self.out_channels)
+
         self.W.grad += d_w
 
         # d_b -> d_out
-        d_b = np.sum(d_out, axis=(0, 1, 2))
-        self.B.grad = d_b
 
-        return d_x[:, self.padding:-self.padding, self.padding:-self.padding, :] if self.padding > 0 else d_x
+        d_b = np.sum(gradient_patch, axis=0)
+
+        self.B.grad += d_b
+
+
+
+        return result[:, self.padding:-self.padding, self.padding:-self.padding, :] if self.padding > 0 else result
 
 
     def params(self):
