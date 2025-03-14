@@ -1,4 +1,5 @@
 import numpy as np
+import cupy as cp
 
 
 class Param:
@@ -251,6 +252,108 @@ def col2im(dx_patches, x_shape, filter_size, stride):
 
     return result
 
+def im2col_idx(x_shape, filter_size, stride):
+    """
+    Generate indices required for extracting image patches for convolution operation.
+
+    Params:
+        x_shape: Tuple representing the shape of input tensor (batch_size, height, width, channels)
+        filter_size: Size of convolutional filter (assumed square)
+        stride: Stride size for sliding the filter
+
+    Returns:
+        batch_indices: Indices corresponding to batch dimension
+        y_indices: Indices for each patch along height dimension
+        x_indices: Indices for each patch along width dimension
+        channel_indices: Indices corresponding to channel dimension
+    """
+    batch_size, ch, h, w = x_shape
+
+    # y_start for height patch starts, x_start for width patch starts
+    y_start = np.arange(0, h - filter_size + 1, stride)
+    x_start = np.arange(0, w - filter_size + 1, stride)
+
+    # meshgrid(y_start, x_start) for in-kernel positions
+    y_starts, x_starts = np.meshgrid(y_start, x_start, indexing='ij')  # [H_out, W_out]
+
+    dy, dx = np.mgrid[0:filter_size, 0:filter_size]  # [filter_size, filter_size]
+
+    y_indices = y_starts[:, :, None, None] + dy  # [H_out, W_out, k, k]
+    x_indices = x_starts[:, :, None, None] + dx  # [H_out, W_out, k, k]
+
+    # Add batch and channel dimensions
+    batch_indices = np.arange(batch_size)[:, None, None, None, None, None]  # [N, 1, 1, 1, 1, 1]
+    channel_indices = np.arange(ch)[None, None, None, :, None, None]  # [1, 1, 1, C, 1, 1]
+    # the order plays crucial role in proper ordering when indexing and reshaping
+
+    return batch_indices, y_indices, x_indices, channel_indices
+
+
+def im2col_matrix(X, filter_size, stride):
+    """
+    Converts batched images into a matrix format suitable for efficient GPU-based convolution operations.
+
+    Params:
+        X: Input tensor of images with shape (batch_size, height, width, in_channels)
+        filter_size: Size of convolutional filter (assumed square)
+        stride: Stride size for sliding the convolutional filter
+
+    Returns:
+        A reshaped matrix suitable for convolution with shape:
+        (batch_size * height_out * width_out, filter_size * filter_size * in_channels)
+    """
+    batch_size, ch, h, w = X.shape
+    h_out = (h - filter_size) // stride + 1
+    w_out = (w - filter_size) // stride + 1
+
+    batch_indices, y_indices, x_indices, channel_indices = im2col_idx(X.shape, filter_size, stride)
+
+    # Expand indices for broadcasting
+    y_indices_exp = y_indices[np.newaxis, :, :, np.newaxis, :, :]  # [1, 1, H_out, W_out, k, k]
+    x_indices_exp = x_indices[np.newaxis, :, :, np.newaxis, :, :]  # [1, 1, H_out, W_out, k, k]
+
+    # Extract patches
+    patches = X[
+        batch_indices,  # [N, 1, 1, 1, 1, 1]
+        channel_indices,  # [1, C, 1, 1, 1, 1]
+        y_indices_exp,  # [1, 1, H_out, W_out, k, k]
+        x_indices_exp  # [1, 1, H_out, W_out, k, k]
+    ]  # [N, C, H_out, W_out, k, k]
+
+    # Reshape to [N * H_out * W_out, k * k * C]
+    return patches.reshape(batch_size * h_out * w_out, filter_size * filter_size * ch)
+
+
+def col2im_backward(dx_patches, x_shape, filter_size, stride):
+    batch_size, in_ch, h_in, w_in = x_shape
+
+    # Initialize the result tensor to accumulate gradients
+    result = np.zeros((batch_size, in_ch, h_in, w_in))
+
+    # Retrieve indices used previously in im2col to map patches back to input positions
+    batch_idx, y_idx, x_idx, channel_idx = im2col_idx(x_shape, filter_size, stride)
+
+    y_idx = y_idx[np.newaxis, :, :, np.newaxis, :, :]
+    x_idx = x_idx[np.newaxis, :, :, np.newaxis, :, :]
+
+    # Expand indices dimensions for broadcasting compatibility
+    batch_idx = batch_idx + np.zeros_like(y_idx) + np.zeros_like(channel_idx)
+    channel_idx = channel_idx + np.zeros_like(y_idx) + np.zeros_like(batch_idx)
+    y_idx = y_idx + np.zeros_like(channel_idx) + np.zeros_like(batch_idx)
+    x_idx = x_idx + np.zeros_like(channel_idx) + np.zeros_like(batch_idx)
+
+    # Flatten indices and gradients to enable accumulation
+    batch_idx_flat = batch_idx.ravel()
+    y_idx_flat = y_idx.ravel()
+    x_idx_flat = x_idx.ravel()
+    channel_idx_flat = channel_idx.ravel()
+    dx_patches_flat = dx_patches.ravel()
+
+    # Accumulate gradients from dx_patches back into original input tensor positions
+    np.add.at(result, (batch_idx_flat, channel_idx_flat, y_idx_flat, x_idx_flat), dx_patches_flat)
+
+    return result
+
 
 class ConvolutionalLayerGPU:
     def __init__(self, in_channels, out_channels,
@@ -259,150 +362,80 @@ class ConvolutionalLayerGPU:
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.W = Param(
-            np.random.randn(filter_size, filter_size, in_channels, out_channels) * np.sqrt(2.0 / (filter_size * filter_size * in_channels))
+            cp.random.randn(filter_size, filter_size, in_channels, out_channels) * np.sqrt(
+                2.0 / (filter_size * filter_size * in_channels))
         )
+        self.W.grad = cp.asarray(self.W.grad)
 
-        self.B = Param(np.zeros(out_channels))
+        self.B = Param(cp.zeros(out_channels))
+        self.B.grad = cp.asarray(self.B.grad)
 
         self.padding = padding
 
         self.last_X = None
         self.last_X_shape = None
-
+        # Store im2col matrix for backward pass
+        self.im2col_input = None
 
     def forward(self, X):
         # get shape of the input tensor
-        batch_size, height, width, in_channels = X.shape
-
+        batch_size, in_channels, height, width = X.shape
 
         # compute shape of output tensor
         out_height = height - self.filter_size + 1 + 2 * self.padding
         out_width = width - self.filter_size + 1 + 2 * self.padding
 
         # pad the input tensor
-        X = apply_padding(X, self.padding) if self.padding > 0 else X
-
-        input_matrix = im2col(X, self.filter_size, 1) # [batch_size * height_out * width_out, filter_size * filter_size * in_channels]
+        X = np.pad(X, ((0,0), (0,0), (self.padding,)*2, (self.padding,)*2))
 
         # save last input for backward pass
-        self.last_X = input_matrix
+        self.last_X = X
+        self.last_X_shape = X.shape
 
-        weights = self.W.value.reshape(self.in_channels * self.filter_size * self.filter_size, self.out_channels) # [in_channels * filter_size * filter_size, out_channels]
+        self.im2col_input = im2col_matrix(X, self.filter_size,1)  # [batch_size * height_out * width_out, filter_size * filter_size * in_channels]
 
-        result = input_matrix @ weights + self.B.value # [batch_size * height_out * width_out, out_channels]
+        weights = self.W.value.reshape(self.in_channels * self.filter_size * self.filter_size,
+                                       self.out_channels)  # [in_channels * filter_size * filter_size, out_channels}
 
-        return result.reshape(batch_size, out_height, out_width, self.out_channels)
+        # im2col matrix to GPU
+        self.im2col_input = cp.asarray(self.im2col_input)
 
+        result = self.im2col_input @ weights + self.B.value  # [batch_size * height_out * width_out, out_channels]
+
+        return cp.asnumpy(result.reshape(batch_size, self.out_channels, out_height, out_width))
 
 
     def backward(self, d_out):
-        batch_size, height, width, in_channels = self.last_X.shape
+        batch_size, in_channels, height, width = self.last_X.shape
 
-        _, out_height, out_width, out_channels = d_out.shape
+        _, out_channels, out_height, out_width = d_out.shape
 
-        result = np.zeros_like(self.last_X)
+        weights = self.W.value.reshape(self.in_channels * self.filter_size * self.filter_size,
+                                       self.out_channels)  # [in_channels * filter_size * filter_size, out_channels]
 
-        weights = self.W.value.reshape(self.in_channels * self.filter_size * self.filter_size, self.out_channels) # [in_channels * filter_size * filter_size, out_channels]
+        reshaped_d_out = d_out.reshape(batch_size * out_height * out_width,
+                                       self.out_channels)  # [batch_size * out_height * out_width, out_channels]
 
-        reshaped_d_out = d_out.reshape(batch_size * out_height * out_width, self.out_channels) # [batch_size * out_height * out_width, out_channels]
+        # reshaped d_out to GPU
+        reshaped_d_out = cp.asarray(reshaped_d_out)
 
         # d_x -> d_out + weights
-        backprop_matrix = reshaped_d_out @ weights.T # [batch_size * out_height * out_width, filter_size * filter_size * in_channels]
+        backprop_matrix = reshaped_d_out @ weights.T  # [batch_size * out_height * out_width, filter_size * filter_size * in_channels]
 
-        d_x = col2im(backprop_matrix, self.last_X_shape,  self.filter_size, 1)
+        d_x = col2im_backward(cp.asnumpy(backprop_matrix), self.last_X_shape, self.filter_size, 1)
 
         # d_w -> d_out + inputs
-        d_w = self.last_X.T @ reshaped_d_out # [in_channels * filter_size * filter_size, out_channels]
+        d_w = self.im2col_input.T @ reshaped_d_out  # [in_channels * filter_size * filter_size, out_channels]
 
-        self.W.grad += d_w
+        self.W.grad += d_w.reshape(self.W.value.shape)
 
         # d_b -> d_out
 
-        d_b = np.sum(gradient_patch, axis=0)
+        d_b = np.sum(reshaped_d_out, axis=0)
 
         self.B.grad += d_b
 
-
-
-        return result[:, self.padding:-self.padding, self.padding:-self.padding, :] if self.padding > 0 else result
-
+        return d_x[:, :, self.padding:-self.padding, self.padding:-self.padding] if self.padding > 0 else d_x
 
     def params(self):
-        return { 'W': self.W, 'B': self.B }
-
-class MaxPoolingLayer:
-    def __init__(self, pool_size, stride):
-        self.pool_size = pool_size
-        self.stride = stride
-        self.X = None
-
-    def forward(self, X):
-        batch_size, height, width, channels = X.shape
-
-        self.X = X
-
-        out_height = (height - self.pool_size) // self.stride + 1
-        out_width = (width - self.pool_size) // self.stride + 1
-
-        result = np.zeros((batch_size, out_height, out_width, channels))
-
-        for y in range(out_height):
-            for x in range(out_width):
-                patch = X[:, y:y + self.pool_size, x:x + self.pool_size, :]
-                patch_max = np.max(patch, axis=(1, 2))
-
-                result[:, y, x, :] = patch_max
-
-        return result
-
-
-
-    def backward(self, d_out):
-        batch_size, height, width, channels = self.X.shape
-
-        d_input = np.zeros_like(self.X)
-
-        out_width = (width - self.pool_size) // self.stride + 1
-        out_height = (height - self.pool_size) // self.stride + 1
-
-        for y in range(out_height):
-            for x in range(out_width):
-                input_patch = self.X[:, y * self.stride:y * self.stride +self.pool_size, x * self.stride:x * self.stride +self.pool_size, :]
-
-                input_patch_reshaped = input_patch.reshape(batch_size, -1, channels)
-
-                max_idx_local = np.argmax(input_patch_reshaped, axis=1)
-
-                row_idx_local, col_idx_local = np.unravel_index(max_idx_local, (self.pool_size, self.pool_size))
-
-                row_idx_global = row_idx_local + y * self.stride
-                col_idx_global = col_idx_local + x * self.stride
-
-                batch_idx = np.arange(batch_size)[:, None]
-                ch_idx = np.arange(channels)
-
-                d_input[batch_idx, row_idx_global, col_idx_global, ch_idx] += d_out[:, y, x, :]
-
-        return d_input
-
-
-    def params(self):
-        return {}
-
-
-class Flattener:
-    def __init__(self):
-        self.X_shape = None
-
-    def forward(self, X):
-        batch_size, height, width, channels = X.shape
-
-        self.X_shape = X.shape
-
-        return X.reshape(batch_size, -1)
-
-    def backward(self, d_out):
-        return d_out.reshape(self.X_shape)
-
-    def params(self):
-        return {}
+        return {'W': self.W, 'B': self.B}
