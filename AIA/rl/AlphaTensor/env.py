@@ -16,7 +16,7 @@ class Environment:
 
 
     def one_hot(self, i, j):
-        flat_idx = i * np.sqrt(self.size) + j
+        flat_idx = i * self.size + j
         res = np.zeros((self.s,), dtype=np.int32)
         res[flat_idx] = 1
         return res
@@ -34,8 +34,8 @@ class Environment:
                     # then the outer product z_idx (x) a_idx (x) b_idx will form then rank-1 tensor, which tells:
                     # to get C element with flattened coordinate where z_idx = 1 we need to multiply elements of A and B with flat coordinates on their respective axes
                     # since all the vectors are e_m then in the resulting tensor there will be only 1 non-zero element which encodes the combination
-
-                    tensor += outer(a_idx, b_idx, z_idx)
+                    tmp = outer(a_idx, b_idx, z_idx)
+                    tensor += tmp
 
 
         # DeepMind also explain change basis idea, for generating more data from single run and add variance to the system
@@ -72,7 +72,7 @@ class Environment:
         self.step_count = 0
 
 if __name__ == '__main__':
-    test_env = Environment(size=4,
+    test_env = Environment(size=2,
                            limit_steps=8)
     test_action = np.array([
         [0, 0, 1, 0],
@@ -82,4 +82,3 @@ if __name__ == '__main__':
     for _ in range(8):
         print(test_env.step(test_action))
         print(test_env.accumulate_reward)
-    import pdb; pdb.set_trace()
