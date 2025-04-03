@@ -78,7 +78,32 @@ class PolicyHead(nn.Module):
 
         return torch.tensor(generated[:self.max_len], device=tensor_state.device).unsqueeze(0)
 
+class ValueHead(nn.Module):
+    def __init__(self, hidden_dim=512):
+        super().__init__()
+        self.fc1 = nn.Linear(hidden_dim, hidden_dim)
+        self.a1 = nn.ReLU()
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.a2 = nn.ReLU()
+        self.fc3 = nn.Linear(hidden_dim, 1)
 
+    def forward(self, tensor_state):
+
+        z1 = self.a1(self.fc1(tensor_state))
+        z2 = self.a2(self.fc2(z1))
+        out = self.fc3(z2)
+
+        return out
+
+
+class Net:
+    def __init__(self):
+        self.torso = Torso()
+        self.policy_head = PolicyHead()
+        self.value_head = ValueHead()
+        self.last_torso = None
+
+    def forward(self, tensor_state):
 
 tensor_state = torch.randn((1, 512))
 
