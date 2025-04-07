@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 from torch import nn
 
@@ -46,10 +47,10 @@ class PolicyHead(nn.Module):
         self.gru = nn.GRU(hidden_dim, hidden_dim, batch_first=True)
         self.output = nn.Linear(hidden_dim, vocab_size)
 
-    def forward(self, tensor_state):
+    def forward(self, tensor_emb):
         # tensor_state shape: [batch_size, hidden_dim], typically batch_size=1
-        h = tensor_state.unsqueeze(0)  # [1, batch_size, hidden_dim] (num_layers=1)
-        input_token = torch.tensor([[self.pad_token_id]], device=tensor_state.device)
+        h = tensor_emb.unsqueeze(0)  # [1, batch_size, hidden_dim] (num_layers=1)
+        input_token = torch.tensor([[self.pad_token_id]], device=tensor_emb.device)
         generated = []
 
         for step in range(self.max_len):
@@ -61,13 +62,18 @@ class PolicyHead(nn.Module):
             # GRU step
             out, h = self.gru(x, h)
             logits = self.output(out.squeeze(1))
+
+            # Ensure the 3 token is not generated except manual separator insertion
+            logits[:, self.pad_token_id] = float('-inf')
+
+            # Sample next token
             next_token = torch.argmax(logits, dim=-1, keepdim=True)
 
             generated.append(next_token.item())
 
             # Insert pad token every 12 steps (excluding step 0)
             if (step + 1) % 12 == 0 and (step + 1) < self.max_len:
-                input_token = torch.tensor([[self.pad_token_id]], device=tensor_state.device)
+                input_token = torch.tensor([[self.pad_token_id]], device=tensor_emb.device)
                 generated.append(self.pad_token_id)
             else:
                 input_token = next_token
@@ -76,7 +82,7 @@ class PolicyHead(nn.Module):
             if len(generated) >= self.max_len:
                 break
 
-        return torch.tensor(generated[:self.max_len], device=tensor_state.device).unsqueeze(0)
+        return torch.tensor(generated[:self.max_len], device=tensor_emb.device).unsqueeze(0)
 
 class ValueHead(nn.Module):
     def __init__(self, hidden_dim=512):
@@ -87,9 +93,9 @@ class ValueHead(nn.Module):
         self.a2 = nn.ReLU()
         self.fc3 = nn.Linear(hidden_dim, 1)
 
-    def forward(self, tensor_state):
+    def forward(self, tensor_emb):
 
-        z1 = self.a1(self.fc1(tensor_state))
+        z1 = self.a1(self.fc1(tensor_emb))
         z2 = self.a2(self.fc2(z1))
         out = self.fc3(z2)
 
@@ -103,13 +109,24 @@ class Net:
         self.value_head = ValueHead()
         self.last_torso = None
 
-    def forward(self, tensor_state):
+    def forward(self, tensor_input, scalar_input):
+        tensor_embedding = self.torso(tensor_input, scalar_input)
+        action_sequence = self.policy_head(tensor_embedding)
+        value_sequence = self.value_head(tensor_embedding)
+        return action_sequence[0, :], value_sequence
+
 
 tensor_state = torch.randn((1, 512))
-
-
 policy = PolicyHead()
 
-a = policy(tensor_state)
+a = policy(tensor_state)[0, :]
 
-# Value Head
+separator = 3
+
+sep_indices = (a == separator).nonzero(as_tuple=True)[0]
+
+boundaries = torch.cat([torch.tensor([-1]), sep_indices, torch.tensor([len(a)])])
+
+segments = [a[boundaries[i]+1:boundaries[i+1]] for i in range(len(boundaries)-1)]
+
+print(33)
