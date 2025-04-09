@@ -71,6 +71,19 @@ class Environment:
         self.accumulate_reward = 0
         self.step_count = 0
 
+
+
+def mimic_step_fn(state, action):
+    u, v, w = action
+
+    step_tensor = outer(u, v, w)
+
+    new_state = state - step_tensor
+
+    is_terminated = is_zero_tensor(new_state)
+
+    return new_state, is_terminated
+
 if __name__ == '__main__':
     test_env = Environment(size=2,
                            limit_steps=8)

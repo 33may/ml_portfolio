@@ -1,26 +1,22 @@
 import numpy as np
 import pandas as pd
 
-from AIA.rl.AlphaTensor.helpers import outer
+from AIA.rl.AlphaTensor.helpers import outer, get_random_action
 
-
-def sample_random_factor(s):
-    factor = np.random.randint(-1,1, (s,))
-    return -factor if factor[0] < 0 else factor
 
 def shuffle_actions(actions):
     return list(np.random.permutation(actions))
 
-def generate_trajectory(s=4, num_shuffle=4):
+def generate_trajectory():
     num_factors = 7 + np.random.randint(0, 4)
     rows = []
     actions = []
 
-    tensor = np.zeros((s, s, s))
+    tensor = np.zeros((4, 4, 4))
 
     # build full tensor from random factors
     for _ in range(num_factors):
-        u, v, w = sample_random_factor(s), sample_random_factor(s), sample_random_factor(s)
+        u, v, w = get_random_action()
         actions.append([u, v, w])
         component = outer(u, v, w)
         tensor += component
@@ -39,12 +35,12 @@ def generate_trajectory(s=4, num_shuffle=4):
 
     return tensor, rows
 
-def generate_synthetic_dataset(dataset_size, num_shuffle=4, tensor_size=2, save_to_file=True):
+def generate_synthetic_dataset(dataset_size, num_shuffle=4, save_to_file=True):
     rows = []
     trajectories_num = dataset_size // num_shuffle + 1
 
     for _ in range(trajectories_num):
-        tensor, trajectory_variations = generate_trajectory(s=tensor_size, num_shuffle=num_shuffle)
+        tensor, trajectory_variations = generate_trajectory()
         for traj in trajectory_variations:
             rows.append(traj)
 

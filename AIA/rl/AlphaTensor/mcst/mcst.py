@@ -2,72 +2,77 @@ import numpy as np
 import copy
 from typing import Optional
 
-from AIA.rl.AlphaTensor.helpers import is_zero_tensor
+from AIA.rl.AlphaTensor.env import mimic_step_fn
+from AIA.rl.AlphaTensor.helpers import is_zero_tensor, get_random_action
 
 
 class MCTSNode:
-    def __init__(self, state, parent=None, action_taken=None, is_terminal=False):
+    def __init__(self, state, depth, parent=None, action_taken=None, is_terminal=False):
         self.state = state                  # Current tensor state
         self.parent = parent                # Parent node in the tree
-        self.action_taken = action_taken    # Action that led from parent to this node
+        self.action_from_parent = action_taken    # Action that led from parent to this node
         self.is_terminal = is_terminal
+        self.taken_actions = set()
 
         self.children = []                  # List of child nodes
         self.visits = 0                     # Number of visits to this node
         self.value_sum = 0.0                # Sum of all values backpropagated through this node
 
-        self.untried_actions = None         # Will be set during expansion
-        # Note: self.untried_actions is a list of actions not yet used to create child nodes
+        self.is_expanded = False         # Will be set during expansion
 
-    def is_fully_expanded(self):
-        """
-        Return True if all actions have already been expanded into children.
-        """
-        if self.untried_actions is None:
-            return False  # Not expanded yet
-        return len(self.untried_actions) == 0
+        self.depth = depth
 
-    def best_child(self, c_param=1.0):
-        """
-        Use UCB1 formula to choose best child: Q + c * sqrt(log(N_parent) / N_child)
-        Higher score means better.
-        """
-        choices = [
-            (child.value_sum / (child.visits + 1e-8)) +
-            c_param * np.sqrt(np.log(self.visits + 1) / (child.visits + 1e-8))
-            for child in self.children
-        ]
-        return self.children[np.argmax(choices)]
+        self.limit_nodes_c = 10
+
+    def get_limit_nodes(self):
+        return self.limit_nodes_c * np.sqrt(self.visits)
 
     def expand(self, env, net):
         """
         Expand this node:
-        1. Call the network on the current state to get value and policy
-        2. Decode a set of promising actions from the policy
-        3. Pick one untried action and apply it to get a new state
-        4. Create a new child node with the resulting state
+            1. add candidates from policy network (check for duplicates)
+            2. check for already expanded nodes in children
+            3. add new nodes
+            4. fill the remaining with random actions
+
         """
-        if self.untried_actions is None:
-            # First time expansion — call NN to get policy and value
-            # Prepare network input from state
-            tensor_input, scalar_input = self.prepare_network_input()
-            action_sequence, value = net(tensor_input, scalar_input)
+        tensor_input, scalar_input = self.prepare_network_input()
+        action_sequence, value = net(tensor_input, scalar_input)
 
-            # TODO: Decode `action_sequence` into a list of valid action tensors
-            self.untried_actions = self.decode_actions(action_sequence)
+        # //TODO update model estimate of the current node value
 
-        # Pick actions to expand
 
-        action = self.untried_actions.pop()
-        env_copy = copy.deepcopy(env)
-        next_state, done = env_copy.step(action)
+        # //TODO fix decode_action to properly work with step and mimic_step_fn (u,v,w)
+        new_actions = self.decode_actions(action_sequence) # action sequence generates 4 actions
 
-        child_node = MCTSNode(state=next_state,
-                              parent=self,
-                              action_taken=action,
-                              is_terminal=is_zero_tensor(next_state))
-        self.children.append(child_node)
-        return child_node, value
+        new_unique_actions = list(set(new_actions) - self.taken_actions)
+        self.taken_actions.update(new_unique_actions)
+
+        # for all actions that are already expanded generate new random actions
+        num_random_actions = 4 - len(new_unique_actions)
+
+        for action in new_unique_actions:
+            new_state, is_terminated = mimic_step_fn(self.state, action)
+            child_node = MCTSNode(state=new_state,
+                                  depth=self.depth + 1,
+                                  parent=self,
+                                  action_taken=action,
+                                  is_terminal=is_terminated)
+            self.children.append(child_node)
+
+        for i in range(num_random_actions):
+            action = get_random_action()
+
+            if action not in self.taken_actions:
+                new_state, is_terminated = mimic_step_fn(self.state, action)
+                child_node = MCTSNode(state=new_state,
+                                      depth=self.depth + 1,
+                                      parent=self,
+                                      action_taken=action,
+                                      is_terminal=is_terminated)
+                self.children.append(child_node)
+                self.taken_actions.add(action)
+
 
     def backpropagate(self, reward):
         """
