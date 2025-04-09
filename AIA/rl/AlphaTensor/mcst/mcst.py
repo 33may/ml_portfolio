@@ -9,7 +9,7 @@ from AIA.rl.AlphaTensor.helpers import is_zero_tensor, get_random_action, action
 
 
 class MCTSNode:
-    def __init__(self, state, depth, parent=None, action_taken=None, is_terminal=False):
+    def __init__(self, state, depth, value_estimate, parent=None, action_taken=None, is_terminal=False):
         self.state = state                  # Current tensor state
         self.parent = parent                # Parent node in the tree
         self.action_from_parent = action_taken    # Action that led from parent to this node
@@ -21,6 +21,7 @@ class MCTSNode:
         self.total_rank = 0
         self.visits = 0                     # Number of visits to this node
         self.value_sum = 0.0                # Sum of all values backpropagated through this node
+        self.value_estimate = value_estimate
 
         self.is_expanded = False         # Will be set during expansion
 
@@ -32,7 +33,7 @@ class MCTSNode:
     def get_limit_nodes(self):
         return self.limit_nodes_c * np.sqrt(self.visits)
 
-    def expand(self, net):
+    def expand(self, torso_model, value_model, policy_model):
         """
         Expand this node:
             1. add candidates from policy network (check for duplicates)
@@ -42,10 +43,11 @@ class MCTSNode:
 
         """
         tensor_input, scalar_input = self.prepare_network_input()
-        action_sequence, value = net(tensor_input, scalar_input)
 
+        torso = torso_model(tensor_input, scalar_input)
+
+        action_sequence, value = policy_model(torso)
         # //TODO update model estimate of the current node value
-
 
         # //TODO fix decode_action to properly work with step and mimic_step_fn (u,v,w)
         new_actions = action_seq_to_actions(action_sequence) # action sequence generates 4 actions
@@ -58,11 +60,18 @@ class MCTSNode:
 
         for idx, action in enumerate(new_unique_actions):
             new_state, is_terminated = mimic_step_fn(self.state, action)
+
+            new_node_emb = torso_model(new_state, scalar_input + 1)
+
+            new_node_value = value_model(new_node_emb)
+
             child_node = MCTSNode(state=new_state,
                                   depth=self.depth + 1,
+                                  value_estimate=new_node_value,
                                   parent=self,
                                   action_taken=action,
                                   is_terminal=is_terminated)
+
             rank = self.cur_max_rank + len(new_unique_actions) - idx
             self.total_rank += rank
             self.children.append((child_node, rank))
@@ -72,8 +81,14 @@ class MCTSNode:
 
             if action not in self.taken_actions:
                 new_state, is_terminated = mimic_step_fn(self.state, action)
+
+                new_node_emb = torso_model(new_state, scalar_input + 1)
+
+                new_node_value = value_model(new_node_emb)
+
                 child_node = MCTSNode(state=new_state,
                                       depth=self.depth + 1,
+                                      value_estimate=new_node_value,
                                       parent=self,
                                       action_taken=action,
                                       is_terminal=is_terminated)
@@ -83,9 +98,9 @@ class MCTSNode:
 
 
     def explore(self):
-        return random.random() < 0.5
+        return random.random() < 0.12
 
-    def select_best_child(self, net):
+    def select_best_child(self, torso_model, value_model, policy_model):
         """
         When we come to the node, the select method is called.
 
@@ -95,7 +110,7 @@ class MCTSNode:
         """
 
         if len(self.children) < self.get_limit_nodes() or self.explore():
-            self.expand(net)
+            self.expand(torso_model, value_model, policy_model)
 
         best_score = -float('inf')
         best_child = None
@@ -103,7 +118,7 @@ class MCTSNode:
         for child_node, rank in self.children:
             # Q = value_sum / visits
             if child_node.visits == 0:
-                q_value = 0  # You can also use child_node.value_estimate if available
+                q_value = self.value_estimate
             else:
                 q_value = child_node.value_sum / child_node.visits
 
@@ -119,12 +134,15 @@ class MCTSNode:
 
         return best_child
 
-
     def backpropagate(self, reward):
         """
-        After simulation/evaluation, propagate the reward back up the tree.
-        Each node in the path increases its visit count and adds reward to value_sum.
+        Распространяет полученную награду (reward) вверх по дереву
         """
+        node = self
+        while node is not None:
+            node.visits += 1
+            node.value_sum += reward
+            node = node.parent
 
     def prepare_network_input(self):
         """
