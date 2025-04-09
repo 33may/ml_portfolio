@@ -1,9 +1,11 @@
+import random
+
 import numpy as np
 import copy
 from typing import Optional
 
 from AIA.rl.AlphaTensor.env import mimic_step_fn
-from AIA.rl.AlphaTensor.helpers import is_zero_tensor, get_random_action
+from AIA.rl.AlphaTensor.helpers import is_zero_tensor, get_random_action, action_seq_to_actions
 
 
 class MCTSNode:
@@ -15,6 +17,8 @@ class MCTSNode:
         self.taken_actions = set()
 
         self.children = []                  # List of child nodes
+        self.cur_max_rank = 0
+        self.total_rank = 0
         self.visits = 0                     # Number of visits to this node
         self.value_sum = 0.0                # Sum of all values backpropagated through this node
 
@@ -23,11 +27,12 @@ class MCTSNode:
         self.depth = depth
 
         self.limit_nodes_c = 10
+        self.c_puct = 1.5
 
     def get_limit_nodes(self):
         return self.limit_nodes_c * np.sqrt(self.visits)
 
-    def expand(self, env, net):
+    def expand(self, net):
         """
         Expand this node:
             1. add candidates from policy network (check for duplicates)
@@ -43,7 +48,7 @@ class MCTSNode:
 
 
         # //TODO fix decode_action to properly work with step and mimic_step_fn (u,v,w)
-        new_actions = self.decode_actions(action_sequence) # action sequence generates 4 actions
+        new_actions = action_seq_to_actions(action_sequence) # action sequence generates 4 actions
 
         new_unique_actions = list(set(new_actions) - self.taken_actions)
         self.taken_actions.update(new_unique_actions)
@@ -51,14 +56,16 @@ class MCTSNode:
         # for all actions that are already expanded generate new random actions
         num_random_actions = 4 - len(new_unique_actions)
 
-        for action in new_unique_actions:
+        for idx, action in enumerate(new_unique_actions):
             new_state, is_terminated = mimic_step_fn(self.state, action)
             child_node = MCTSNode(state=new_state,
                                   depth=self.depth + 1,
                                   parent=self,
                                   action_taken=action,
                                   is_terminal=is_terminated)
-            self.children.append(child_node)
+            rank = self.cur_max_rank + len(new_unique_actions) - idx
+            self.total_rank += rank
+            self.children.append((child_node, rank))
 
         for i in range(num_random_actions):
             action = get_random_action()
@@ -70,8 +77,47 @@ class MCTSNode:
                                       parent=self,
                                       action_taken=action,
                                       is_terminal=is_terminated)
-                self.children.append(child_node)
+                self.children.append((child_node, 1))
+                self.total_rank += 1
                 self.taken_actions.add(action)
+
+
+    def explore(self):
+        return random.random() < 0.5
+
+    def select_best_child(self, net):
+        """
+        When we come to the node, the select method is called.
+
+        It either expands the node or not.
+
+        Then process to select the best child node.
+        """
+
+        if len(self.children) < self.get_limit_nodes() or self.explore():
+            self.expand(net)
+
+        best_score = -float('inf')
+        best_child = None
+
+        for child_node, rank in self.children:
+            # Q = value_sum / visits
+            if child_node.visits == 0:
+                q_value = 0  # You can also use child_node.value_estimate if available
+            else:
+                q_value = child_node.value_sum / child_node.visits
+
+            prior = rank / self.total_rank if self.total_rank > 0 else 0
+
+            u_value = self.c_puct * prior * (np.sqrt(self.visits) / (1 + child_node.visits))
+
+            score = q_value + u_value
+
+            if score > best_score:
+                best_score = score
+                best_child = child_node
+
+        return best_child
 
 
     def backpropagate(self, reward):
@@ -79,17 +125,6 @@ class MCTSNode:
         After simulation/evaluation, propagate the reward back up the tree.
         Each node in the path increases its visit count and adds reward to value_sum.
         """
-        self.visits += 1
-        self.value_sum += reward
-        if self.parent is not None:
-            self.parent.backpropagate(reward)
-
-    def is_terminal(self):
-        """
-        Determine if this state is terminal. This usually means the game is over
-        or all elements in the tensor are zero.
-        """
-        return self.env
 
     def prepare_network_input(self):
         """
@@ -99,13 +134,6 @@ class MCTSNode:
         # TODO: Implement based on your model's expected input format
         raise NotImplementedError
 
-    def decode_actions(self, token_sequence):
-        """
-        Decodes the output from the policy head into valid tensor actions.
-        Each action should be a 3-vector outer product (u, v, w).
-        """
-        # TODO: Implement token decoding to action tensors
-        raise NotImplementedError
 
 
 class MCTS:

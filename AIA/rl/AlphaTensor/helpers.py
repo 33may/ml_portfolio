@@ -20,7 +20,7 @@ def action_seq_to_actions(action_seq, separator = 3):
     return action_seq
 
 def sample_random_factor():
-    factor = np.random.randint(-1,1, (s,))
+    factor = np.random.randint(-1,1, (4,))
     return -factor if factor[0] < 0 else factor
 
 def get_random_action():

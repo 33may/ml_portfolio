@@ -50,6 +50,3 @@ def generate_synthetic_dataset(dataset_size, num_shuffle=4, save_to_file=True):
         dataset.to_pickle("synthetic_dataset.pkl")
 
     return dataset
-
-dataset = generate_synthetic_dataset(20)
-

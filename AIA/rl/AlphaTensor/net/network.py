@@ -19,14 +19,16 @@ class Torso(nn.Module):
         self.l2 = nn.Linear(hidden_dim, hidden_dim)
         self.r2 = nn.ReLU()
 
-    def forward(self, tensor_input, scalar_input):
+    def forward(self, tensor_input
+                # , scalar_input
+                ):
         """
         tensor_input: [S, S, S] = [4, 4, 4]
         scalar_input: [1] (step)
         """
-        x = tensor_input.reshape(1, -1)     # [1, 64]
-        s = scalar_input.reshape(1, -1)     # [1, 1]
-        x = torch.cat([x, s], dim=1)        # [1, 65]
+        x = tensor_input
+        # s = scalar_input.reshape(1, -1)     # [1, 1]
+        # x = torch.cat([x, s], dim=1)        # [1, 65]
 
         z1 = self.r1(self.l1(x))
         z2 = self.r2(self.l2(z1))
@@ -99,7 +101,7 @@ class ValueHead(nn.Module):
         z2 = self.a2(self.fc2(z1))
         out = self.fc3(z2)
 
-        return out
+        return out.squeeze(-1)
 
 
 class Net:
