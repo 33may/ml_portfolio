@@ -48,20 +48,23 @@ def train_critic(critic_model, input, target, optimizer, compute_device):
     optimizer.zero_grad()
     criterion = nn.MSELoss()
 
-    critic_model.train()
-
-    input = input.to(compute_device)
+    input = input.float().to(compute_device)
+    target = target.float().to(compute_device)
 
     output = critic_model(input)
 
+    assert output.shape == target.shape, \
+        f"Shapes mismatch: output {output.shape} vs target {target.shape}"
+
+    # Compute loss
     loss = criterion(output, target)
 
+    # Backprop with gradient clipping
     loss.backward()
-    torch.nn.utils.clip_grad_norm_(critic_model.parameters(), max_norm=1.0)
+    torch.nn.utils.clip_grad_norm_(critic_model.parameters(), 1.0)
     optimizer.step()
 
     return loss.item()
-
 
 def soft_update(target, source, tau):
     for target_param, source_param in zip(target.parameters(), source.parameters()):
