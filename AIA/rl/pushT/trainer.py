@@ -27,6 +27,7 @@ def train_policy(policy_model, critic_model, input, optimizer, compute_device):
     loss = -score.mean()
 
     loss.backward()
+    torch.nn.utils.clip_grad_norm_(policy_model.parameters(), max_norm=1.0)
     optimizer.step()
 
     return loss.item()
@@ -56,6 +57,7 @@ def train_critic(critic_model, input, target, optimizer, compute_device):
     loss = criterion(output, target)
 
     loss.backward()
+    torch.nn.utils.clip_grad_norm_(critic_model.parameters(), max_norm=1.0)
     optimizer.step()
 
     return loss.item()
