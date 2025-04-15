@@ -15,13 +15,12 @@ class Policy(nn.Module):
             nn.LayerNorm(256),
             nn.ReLU(),
             nn.Linear(256, 2),
-            nn.Tanh() # [-1, 1]
         )
-        self.action_scale = 512.0 / 2
 
     def forward(self, x):
-        raw = (self.net(x) + 1) * self.action_scale # [0, 2] * 256
-        return raw
+        raw_output = self.net(x)
+        clipped_output = torch.clamp(raw_output, 0.0, 512.0)
+        return clipped_output
 
 
 class Critic(nn.Module):
