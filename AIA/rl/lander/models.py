@@ -1,4 +1,6 @@
 import os
+
+import torch
 import torch as T
 import torch.nn as nn
 import torch.nn.functional as F
@@ -31,8 +33,8 @@ class ReplayBuffer(object):
     def __init__(self, max_size, input_shape, n_actions):
         self.mem_size = max_size
         self.mem_cntr = 0
-        self.state_memory = np.zeros((self.mem_size, *input_shape))
-        self.new_state_memory = np.zeros((self.mem_size, *input_shape))
+        self.state_memory = np.zeros((self.mem_size, input_shape))
+        self.new_state_memory = np.zeros((self.mem_size, input_shape))
         self.action_memory = np.zeros((self.mem_size, n_actions))
         self.reward_memory = np.zeros(self.mem_size)
         self.terminal_memory = np.zeros(self.mem_size, dtype=np.float32)
@@ -59,57 +61,47 @@ class ReplayBuffer(object):
 
         return states, actions, rewards, states_, terminal
 
+
+import torch as T
+import torch.nn as nn
+import torch.optim as optim
+import os
+
 class CriticNetwork(nn.Module):
     def __init__(self, beta, input_dims, fc1_dims, fc2_dims, n_actions, name,
                  chkpt_dir='tmp/ddpg'):
-        super(CriticNetwork, self).__init__()
-        self.input_dims = input_dims
-        self.fc1_dims = fc1_dims
-        self.fc2_dims = fc2_dims
-        self.n_actions = n_actions
-        self.checkpoint_file = os.path.join(chkpt_dir,name+'_ddpg')
-        self.fc1 = nn.Linear(*self.input_dims, self.fc1_dims)
-        f1 = 1./np.sqrt(self.fc1.weight.data.size()[0])
-        T.nn.init.uniform_(self.fc1.weight.data, -f1, f1)
-        T.nn.init.uniform_(self.fc1.bias.data, -f1, f1)
-        #self.fc1.weight.data.uniform_(-f1, f1)
-        #self.fc1.bias.data.uniform_(-f1, f1)
-        self.bn1 = nn.LayerNorm(self.fc1_dims)
+        super().__init__()
 
-        self.fc2 = nn.Linear(self.fc1_dims, self.fc2_dims)
-        f2 = 1./np.sqrt(self.fc2.weight.data.size()[0])
-        #f2 = 0.002
-        T.nn.init.uniform_(self.fc2.weight.data, -f2, f2)
-        T.nn.init.uniform_(self.fc2.bias.data, -f2, f2)
-        #self.fc2.weight.data.uniform_(-f2, f2)
-        #self.fc2.bias.data.uniform_(-f2, f2)
-        self.bn2 = nn.LayerNorm(self.fc2_dims)
+        self.checkpoint_file = os.path.join(chkpt_dir, name + '_ddpg')
 
-        self.action_value = nn.Linear(self.n_actions, self.fc2_dims)
-        f3 = 0.003
-        self.q = nn.Linear(self.fc2_dims, 1)
-        T.nn.init.uniform_(self.q.weight.data, -f3, f3)
-        T.nn.init.uniform_(self.q.bias.data, -f3, f3)
-        #self.q.weight.data.uniform_(-f3, f3)
-        #self.q.bias.data.uniform_(-f3, f3)
+        self.state_net = nn.Sequential(
+            nn.Linear(input_dims, fc1_dims),
+            nn.LayerNorm(fc1_dims),
+            nn.ReLU(),
+            nn.Linear(fc1_dims, fc2_dims),
+            nn.LayerNorm(fc2_dims)
+        )
+
+        self.action_net = nn.Sequential(
+            nn.Linear(n_actions, fc2_dims),
+            nn.ReLU()
+        )
+
+        self.q_net = nn.Sequential(
+            nn.ReLU(),
+            nn.Linear(fc2_dims, 1)
+        )
 
         self.optimizer = optim.Adam(self.parameters(), lr=beta)
-        self.device = T.device('cuda:0' if T.cuda.is_available() else 'mps')
-
+        self.device = T.device('cuda:0' if T.cuda.is_available() else 'cuda:1')
         self.to(self.device)
 
     def forward(self, state, action):
-        state_value = self.fc1(state)
-        state_value = self.bn1(state_value)
-        state_value = F.relu(state_value)
-        state_value = self.fc2(state_value)
-        state_value = self.bn2(state_value)
-
-        action_value = F.relu(self.action_value(action))
-        state_action_value = F.relu(T.add(state_value, action_value))
-        state_action_value = self.q(state_action_value)
-
-        return state_action_value
+        state_out = self.state_net(state)
+        action_out = self.action_net(action)
+        combined = state_out + action_out
+        q_value = self.q_net(combined)
+        return q_value
 
     def save_checkpoint(self):
         print('... saving checkpoint ...')
@@ -122,36 +114,17 @@ class CriticNetwork(nn.Module):
 class ActorNetwork(nn.Module):
     def __init__(self, alpha, input_dims, fc1_dims, fc2_dims, n_actions, name,
                  chkpt_dir='tmp/ddpg'):
-        super(ActorNetwork, self).__init__()
-        self.input_dims = input_dims
-        self.fc1_dims = fc1_dims
-        self.fc2_dims = fc2_dims
-        self.n_actions = n_actions
-        self.checkpoint_file = os.path.join(chkpt_dir,name+'_ddpg')
-        self.fc1 = nn.Linear(*self.input_dims, self.fc1_dims)
-        f1 = 1./np.sqrt(self.fc1.weight.data.size()[0])
-        T.nn.init.uniform_(self.fc1.weight.data, -f1, f1)
-        T.nn.init.uniform_(self.fc1.bias.data, -f1, f1)
-        #self.fc1.weight.data.uniform_(-f1, f1)
-        #self.fc1.bias.data.uniform_(-f1, f1)
-        self.bn1 = nn.LayerNorm(self.fc1_dims)
-
-        self.fc2 = nn.Linear(self.fc1_dims, self.fc2_dims)
-        #f2 = 0.002
-        f2 = 1./np.sqrt(self.fc2.weight.data.size()[0])
-        T.nn.init.uniform_(self.fc2.weight.data, -f2, f2)
-        T.nn.init.uniform_(self.fc2.bias.data, -f2, f2)
-        #self.fc2.weight.data.uniform_(-f2, f2)
-        #self.fc2.bias.data.uniform_(-f2, f2)
-        self.bn2 = nn.LayerNorm(self.fc2_dims)
-
-        #f3 = 0.004
-        f3 = 0.003
-        self.mu = nn.Linear(self.fc2_dims, self.n_actions)
-        T.nn.init.uniform_(self.mu.weight.data, -f3, f3)
-        T.nn.init.uniform_(self.mu.bias.data, -f3, f3)
-        #self.mu.weight.data.uniform_(-f3, f3)
-        #self.mu.bias.data.uniform_(-f3, f3)
+        super().__init__()
+        self.net = nn.Sequential(
+                nn.Linear(input_dims, 256),
+                nn.LayerNorm(256),
+                nn.ReLU(),
+                nn.Linear(256, 256),
+                nn.LayerNorm(256),
+                nn.ReLU(),
+                nn.Linear(256, 2),
+                nn.Tanh()
+        )
 
         self.optimizer = optim.Adam(self.parameters(), lr=alpha)
         self.device = T.device('cuda:0' if T.cuda.is_available() else 'mps')
@@ -159,15 +132,9 @@ class ActorNetwork(nn.Module):
         self.to(self.device)
 
     def forward(self, state):
-        x = self.fc1(state)
-        x = self.bn1(x)
-        x = F.relu(x)
-        x = self.fc2(x)
-        x = self.bn2(x)
-        x = F.relu(x)
-        x = T.tanh(self.mu(x))
-
-        return x
+        raw_output = self.net(state)
+        # scaled = (raw_output + 1) * 512
+        return raw_output
 
     def save_checkpoint(self):
         print('... saving checkpoint ...')

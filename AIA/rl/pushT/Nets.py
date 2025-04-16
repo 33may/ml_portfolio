@@ -15,12 +15,15 @@ class Policy(nn.Module):
             nn.LayerNorm(256),
             nn.ReLU(),
             nn.Linear(256, 2),
+            nn.Tanh()
         )
 
     def forward(self, x):
         raw_output = self.net(x)
-        clipped_output = torch.clamp(raw_output, 0.0, 512.0)
-        return clipped_output
+
+        # scaled = (raw_output + 1)
+
+        return raw_output
 
 
 class Critic(nn.Module):
@@ -68,3 +71,7 @@ class OUNoise:
         # Linear decay
         progress = min(self.step_count / self.decay_steps, 1.0)
         return self.initial_sigma + (self.final_sigma - self.initial_sigma) * progress
+
+
+class Agent:
+    def __init__(self, env):
