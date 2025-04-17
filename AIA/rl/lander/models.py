@@ -16,20 +16,13 @@ class OUActionNoise(object):
         self.sigma = sigma
         self.dt = dt
         self.x0 = x0
-        self.reset()
+        self.x_prev = x0
 
     def __call__(self):
         x = self.x_prev + self.theta * (self.mu - self.x_prev) * self.dt + \
             self.sigma * np.sqrt(self.dt) * np.random.normal(size=self.mu.shape)
         self.x_prev = x
         return x
-
-    def reset(self):
-        self.x_prev = self.x0 if self.x0 is not None else np.zeros_like(self.mu)
-
-    def __repr__(self):
-        return 'OrnsteinUhlenbeckActionNoise(mu={}, sigma={})'.format(
-                                                            self.mu, self.sigma)
 
 class ReplayBuffer(object):
     def __init__(self, max_size, input_shape, n_actions):
@@ -41,10 +34,10 @@ class ReplayBuffer(object):
         self.reward_memory = np.zeros(self.mem_size)
         self.terminal_memory = np.zeros(self.mem_size, dtype=np.float32)
 
-    def store_transition(self, state, action, reward, state_, done):
+    def store_transition(self, state, action, reward, new_state, done):
         index = self.mem_cntr % self.mem_size
         self.state_memory[index] = state
-        self.new_state_memory[index] = state_
+        self.new_state_memory[index] = new_state
         self.action_memory[index] = action
         self.reward_memory[index] = reward
         self.terminal_memory[index] = 1 - done
@@ -246,7 +239,7 @@ class ActorNetwork(nn.Module):
 
 class Agent(object):
     def __init__(self, alpha, beta, input_dims, tau, noise, gamma=0.99,
-                 n_actions=2, max_size=1000000, batch_size=256,
+                 n_actions=2, max_size=10000, batch_size=256,
                  expert_data=None, expert_ratio=0.25):
         self.gamma = gamma
         self.tau = tau
@@ -282,11 +275,9 @@ class Agent(object):
         self.memory.store_transition(state, action, reward, new_state, done)
 
     def sample_mixed_batch(self):
-        # number of expert and live samples
         exp_bs = int(self.expert_ratio * self.batch_size)
         live_bs = self.batch_size - exp_bs
 
-        # sample expert (with replacement if needed)
         expert_batch = random.choices(self.expert_data, k=exp_bs) if len(self.expert_data) > 0 else []
         if expert_batch:
             exp_s, exp_a, exp_r, exp_d, exp_s2 = zip(*expert_batch)
@@ -298,17 +289,14 @@ class Agent(object):
         else:
             exp_s = exp_a = exp_r = exp_s2 = exp_d = np.zeros((0,))
 
-        # sample live from replay buffer
         ls, la, lrw, ls2, ld = self.memory.sample_buffer(live_bs)
 
-        # concatenate
         states = np.vstack([exp_s, ls])
         actions = np.vstack([exp_a, la])
         rewards = np.concatenate([exp_r, lrw])
         states_ = np.vstack([exp_s2, ls2])
         dones = np.concatenate([exp_d, ld])
 
-        # shuffle
         perm = np.random.permutation(self.batch_size)
         return (
             states[perm],
