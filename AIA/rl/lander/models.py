@@ -197,40 +197,63 @@ class Agent(object):
             dones[perm],
         )
 
+
+
+
     def learn(self):
         if self.memory.mem_cntr < self.batch_size:
             return
 
         # 1) sample mixed batch
-        s, a, r, s2, d = self.sample_mixed_batch() if self.expert_data else self.memory.sample_buffer(self.batch_size)
+        # s, a, r, s2, d = self.sample_mixed_batch() if self.expert_data else self.memory.sample_buffer(self.batch_size)
+
+        state, action, reward, new_state, done = \
+            self.memory.sample_buffer(self.batch_size)
 
         # 2) to torch
-        device = self.critic.device
-        states   = torch.tensor(s,  dtype=torch.float32).to(device)
-        actions  = torch.tensor(a,  dtype=torch.float32).to(device)
-        rewards  = torch.tensor(r,  dtype=torch.float32).unsqueeze(1).to(device)
-        states_  = torch.tensor(s2, dtype=torch.float32).to(device)
-        dones    = torch.tensor(d,  dtype=torch.float32).unsqueeze(1).to(device)
+        reward = T.tensor(reward, dtype=T.float).to(self.critic.device)
+        done = T.tensor(done).to(self.critic.device)
+        new_state = T.tensor(new_state, dtype=T.float).to(self.critic.device)
+        action = T.tensor(action, dtype=T.float).to(self.critic.device)
+        state = T.tensor(state, dtype=T.float).to(self.critic.device)
 
         # 3) target Q
-        with torch.no_grad():
-            a2       = self.target_actor(states_)
-            q_next   = self.target_critic(states_, a2)
-            q_target = rewards + self.gamma * q_next * dones
+        # with torch.no_grad():
+        #     a2       = self.target_actor(states_)
+        #     q_next   = self.target_critic(states_, a2)
+        #     q_target = rewards + self.gamma * q_next * dones
+
+        self.target_actor.eval()
+        self.target_critic.eval()
+        self.critic.eval()
+        target_actions = self.target_actor.forward(new_state)
+        critic_value_ = self.target_critic.forward(new_state, target_actions)
+        critic_value = self.critic.forward(state, action)
+
+        target = []
+        for j in range(self.batch_size):
+            target.append(reward[j] + self.gamma * critic_value_[j] * done[j])
+        target = T.tensor(target).to(self.critic.device)
+        target = target.view(self.batch_size, 1)
 
         # 4) critic update
-        q_current = self.critic(states, actions)
-        critic_loss = F.mse_loss(q_current, q_target)
+        self.critic.train()
         self.critic.optimizer.zero_grad()
+        critic_loss = F.mse_loss(target, critic_value)
         critic_loss.backward()
         self.critic.optimizer.step()
 
         # 5) actor update
+        self.critic.eval()
         self.actor.optimizer.zero_grad()
-        mu = self.actor(states)
-        actor_loss = -self.critic(states, mu).mean()
+        mu = self.actor.forward(state)
+        self.actor.train()
+        actor_loss = -self.critic.forward(state, mu)
+        actor_loss = T.mean(actor_loss)
         actor_loss.backward()
         self.actor.optimizer.step()
+
+        self.update_network_parameters()
 
         # 6) soft update
         self.update_network_parameters()
