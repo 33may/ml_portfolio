@@ -321,42 +321,43 @@ class Agent(object):
     def learn(self):
         if self.memory.mem_cntr < self.batch_size:
             return
-
-        # 1) sample batch
-        states, actions, rewards, new_states, done = \
+        state, action, reward, new_state, done = \
             self.memory.sample_buffer(self.batch_size)
 
-        # 2) convert to tensors & reshape
-        dev = self.critic.device
-        states = T.tensor(states, dtype=T.float32, device=dev)
-        actions = T.tensor(actions, dtype=T.float32, device=dev)
-        rewards = T.tensor(rewards, dtype=T.float32, device=dev).view(-1, 1)
-        new_states = T.tensor(new_states, dtype=T.float32, device=dev)
-        done = T.tensor(done, dtype=T.float32, device=dev).view(-1, 1)
+        reward = T.tensor(reward, dtype=T.float).to(self.critic.device)
+        done = T.tensor(done).to(self.critic.device)
+        new_state = T.tensor(new_state, dtype=T.float).to(self.critic.device)
+        action = T.tensor(action, dtype=T.float).to(self.critic.device)
+        state = T.tensor(state, dtype=T.float).to(self.critic.device)
 
-        # 3) target Q-values (no grads into target nets)
-        with T.no_grad():
-            next_actions = self.target_actor(new_states)
-            q_next = self.target_critic(new_states, next_actions)
-            q_target = rewards + self.gamma * q_next * done
+        self.target_actor.eval()
+        self.target_critic.eval()
+        self.critic.eval()
+        target_actions = self.target_actor.forward(new_state)
+        critic_value_ = self.target_critic.forward(new_state, target_actions)
+        critic_value = self.critic.forward(state, action)
 
-        # 4) critic update
+        target = []
+        for j in range(self.batch_size):
+            target.append(reward[j] + self.gamma * critic_value_[j] * done[j])
+        target = T.tensor(target).to(self.critic.device)
+        target = target.view(self.batch_size, 1)
+
         self.critic.train()
         self.critic.optimizer.zero_grad()
-        q_current = self.critic(states, actions)
-        critic_loss = F.mse_loss(q_current, q_target)
+        critic_loss = F.mse_loss(target, critic_value)
         critic_loss.backward()
         self.critic.optimizer.step()
 
-        # 5) actor update
-        self.actor.train()
+        self.critic.eval()
         self.actor.optimizer.zero_grad()
-        mu = self.actor(states)
-        actor_loss = -self.critic(states, mu).mean()
+        mu = self.actor.forward(state)
+        self.actor.train()
+        actor_loss = -self.critic.forward(state, mu)
+        actor_loss = T.mean(actor_loss)
         actor_loss.backward()
         self.actor.optimizer.step()
 
-        # 6) single soft update of target networks
         self.update_network_parameters()
 
     def update_network_parameters(self, tau=None):
