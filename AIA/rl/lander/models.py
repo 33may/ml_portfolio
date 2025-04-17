@@ -63,64 +63,79 @@ class ReplayBuffer(object):
 
         return states, actions, rewards, states_, terminal
 
+
 class CriticNetwork(nn.Module):
     def __init__(self, beta, input_dims, n_actions):
-        super().__init__()
+        super(CriticNetwork, self).__init__()
+        self.input_dims = input_dims
+        self.fc1_dims = 400
+        self.fc2_dims = 300
+        self.n_actions = n_actions
 
-        self.state_net = nn.Sequential(
-            nn.Linear(input_dims, 400),
-            nn.LayerNorm(400),
+        self.state_encoder = nn.Sequential(
+            nn.Linear(self.input_dims, self.fc1_dims),
+            nn.LayerNorm(self.fc1_dims),
             nn.ReLU(),
-            nn.Linear(400, 128),
-            nn.LayerNorm(128)
+            nn.Linear(self.fc1_dims, self.fc2_dims),
+            nn.LayerNorm(self.fc2_dims),
         )
 
-        self.action_net = nn.Sequential(
-            nn.Linear(n_actions, 128),
-            nn.ReLU()
-        )
-
-        self.q_net = nn.Sequential(
+        self.action_encoder = nn.Sequential(
+            nn.Linear(self.n_actions, self.fc2_dims),
             nn.ReLU(),
-            nn.Linear(128, 1)
         )
+
+
+        self.n_actions = n_actions
+
+        self.q = nn.Linear(self.fc2_dims, 1)
 
         self.optimizer = optim.Adam(self.parameters(), lr=beta)
-        self.device = T.device('cuda' if T.cuda.is_available() else 'mps')
+        self.device = T.device('cuda:0' if T.cuda.is_available() else 'mps')
+
         self.to(self.device)
 
     def forward(self, state, action):
-        state_out = self.state_net(state)
-        action_out = self.action_net(action)
-        combined = state_out + action_out
-        q_value = self.q_net(combined)
-        return q_value
+        state_value = self.state_encoder(state)
+
+        action_value = self.action_encoder(action)
+
+        state_action_value = F.relu(T.add(state_value, action_value))
+        state_action_value = self.q(state_action_value)
+
+        return state_action_value
+
 
 class ActorNetwork(nn.Module):
     def __init__(self, alpha, input_dims, n_actions):
-        super().__init__()
+        super(ActorNetwork, self).__init__()
+        self.input_dims = input_dims
+        self.fc1_dims = 400
+        self.fc2_dims = 300
+        self.n_actions = n_actions
+
         self.net = nn.Sequential(
-            nn.Linear(input_dims, 300),
-            nn.LayerNorm(300),
+            nn.Linear(self.input_dims, self.fc1_dims),
+            nn.LayerNorm(self.fc1_dims),
             nn.ReLU(),
-            nn.Linear(300, 300),
-            nn.LayerNorm(300),
+            nn.Linear(self.fc1_dims, self.fc2_dims),
+            nn.LayerNorm(self.fc2_dims),
             nn.ReLU(),
-            nn.Linear(300, n_actions),
-            nn.Tanh(),
+            nn.Linear(self.fc2_dims, self.n_actions),
+            nn.Tanh()
         )
+
+
         self.optimizer = optim.Adam(self.parameters(), lr=alpha)
-        self.device = T.device('cuda' if T.cuda.is_available() else 'mps')
+        self.device = T.device('cuda:0' if T.cuda.is_available() else 'mps')
+
         self.to(self.device)
 
-    # def forward(self, state):
-    #     # now net(state) is in [0,1]
-    #     return self.net(state) * 512.0
-
     def forward(self, state):
-        raw = self.net(state)  # in (−∞, +∞)
 
-        return raw
+        x = self.net(state)
+
+        return x
 
 
 class Agent(object):
