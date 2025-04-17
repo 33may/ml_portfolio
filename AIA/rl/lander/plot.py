@@ -1,7 +1,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
 
-def plotLearning(scores, filename, x=None, window=5):
+def plotLearning(scores, x=None, window=5):
     N = len(scores)
     running_avg = np.empty(N)
     for t in range(N):
@@ -11,4 +11,3 @@ def plotLearning(scores, filename, x=None, window=5):
     plt.ylabel('Score')
     plt.xlabel('Game')
     plt.plot(x, running_avg)
-    plt.savefig(filename)
