@@ -47,7 +47,7 @@ class ReplayBuffer(object):
         self.new_state_memory[index] = state_
         self.action_memory[index] = action
         self.reward_memory[index] = reward
-        self.terminal_memory[index] = 1 - done
+        self.terminal_memory[index] = done
         self.mem_cntr += 1
 
     def sample_buffer(self, batch_size):
@@ -100,25 +100,27 @@ class ActorNetwork(nn.Module):
     def __init__(self, alpha, input_dims, n_actions):
         super().__init__()
         self.net = nn.Sequential(
-                nn.Linear(input_dims, 400),
-                nn.LayerNorm(400),
-                nn.ReLU(),
-                nn.Linear(400, 300),
-                nn.LayerNorm(300),
-                nn.ReLU(),
-                nn.Linear(300, n_actions),
-                nn.Tanh()
+            nn.Linear(input_dims, 400),
+            nn.LayerNorm(400),
+            nn.ReLU(),
+            nn.Linear(400, 300),
+            nn.LayerNorm(300),
+            nn.ReLU(),
+            nn.Linear(300, n_actions),
+            nn.Sigmoid(),
         )
-
         self.optimizer = optim.Adam(self.parameters(), lr=alpha)
         self.device = T.device('cuda:0' if T.cuda.is_available() else 'mps')
-
         self.to(self.device)
 
+    # def forward(self, state):
+    #     # now net(state) is in [0,1]
+    #     return self.net(state) * 512.0
+
     def forward(self, state):
-        raw_output = self.net(state)
-        scaled = (raw_output + 1) * 256
-        return scaled
+        raw = self.net(state)  # in (−∞, +∞)
+
+        return raw
 
 
 class Agent(object):
@@ -140,7 +142,7 @@ class Agent(object):
 
         self.update_network_parameters(tau=1)
 
-        self.expert_data = expert_data or []
+        self.expert_data = expert_data
         self.expert_ratio = expert_ratio
 
     def choose_action(self, observation, eval=False):
@@ -200,7 +202,7 @@ class Agent(object):
             return
 
         # 1) sample mixed batch
-        s, a, r, s2, d = self.sample_mixed_batch()
+        s, a, r, s2, d = self.sample_mixed_batch() if self.expert_data else self.memory.sample_buffer(self.batch_size)
 
         # 2) to torch
         device = self.critic.device
