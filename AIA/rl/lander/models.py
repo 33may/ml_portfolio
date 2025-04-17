@@ -47,7 +47,7 @@ class ReplayBuffer(object):
         self.new_state_memory[index] = state_
         self.action_memory[index] = action
         self.reward_memory[index] = reward
-        self.terminal_memory[index] = done
+        self.terminal_memory[index] = 1 - done
         self.mem_cntr += 1
 
     def sample_buffer(self, batch_size):
@@ -86,7 +86,7 @@ class CriticNetwork(nn.Module):
         )
 
         self.optimizer = optim.Adam(self.parameters(), lr=beta)
-        self.device = T.device('cuda:0' if T.cuda.is_available() else 'cuda:1')
+        self.device = T.device('cuda' if T.cuda.is_available() else 'mps')
         self.to(self.device)
 
     def forward(self, state, action):
@@ -100,17 +100,17 @@ class ActorNetwork(nn.Module):
     def __init__(self, alpha, input_dims, n_actions):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(input_dims, 400),
-            nn.LayerNorm(400),
+            nn.Linear(input_dims, 300),
+            nn.LayerNorm(300),
             nn.ReLU(),
-            nn.Linear(400, 300),
+            nn.Linear(300, 300),
             nn.LayerNorm(300),
             nn.ReLU(),
             nn.Linear(300, n_actions),
-            nn.Sigmoid(),
+            nn.Tanh(),
         )
         self.optimizer = optim.Adam(self.parameters(), lr=alpha)
-        self.device = T.device('cuda:0' if T.cuda.is_available() else 'mps')
+        self.device = T.device('cuda' if T.cuda.is_available() else 'mps')
         self.to(self.device)
 
     # def forward(self, state):
@@ -197,65 +197,45 @@ class Agent(object):
             dones[perm],
         )
 
-
-
-
     def learn(self):
         if self.memory.mem_cntr < self.batch_size:
             return
 
-        # 1) sample mixed batch
-        # s, a, r, s2, d = self.sample_mixed_batch() if self.expert_data else self.memory.sample_buffer(self.batch_size)
-
-        state, action, reward, new_state, done = \
+        # 1) sample batch
+        states, actions, rewards, new_states, done = \
             self.memory.sample_buffer(self.batch_size)
 
-        # 2) to torch
-        reward = T.tensor(reward, dtype=T.float).to(self.critic.device)
-        done = T.tensor(done).to(self.critic.device)
-        new_state = T.tensor(new_state, dtype=T.float).to(self.critic.device)
-        action = T.tensor(action, dtype=T.float).to(self.critic.device)
-        state = T.tensor(state, dtype=T.float).to(self.critic.device)
+        # 2) convert to tensors & reshape
+        dev = self.critic.device
+        states = T.tensor(states, dtype=T.float32, device=dev)
+        actions = T.tensor(actions, dtype=T.float32, device=dev)
+        rewards = T.tensor(rewards, dtype=T.float32, device=dev).view(-1, 1)
+        new_states = T.tensor(new_states, dtype=T.float32, device=dev)
+        done = T.tensor(done, dtype=T.float32, device=dev).view(-1, 1)
 
-        # 3) target Q
-        # with torch.no_grad():
-        #     a2       = self.target_actor(states_)
-        #     q_next   = self.target_critic(states_, a2)
-        #     q_target = rewards + self.gamma * q_next * dones
-
-        self.target_actor.eval()
-        self.target_critic.eval()
-        self.critic.eval()
-        target_actions = self.target_actor.forward(new_state)
-        critic_value_ = self.target_critic.forward(new_state, target_actions)
-        critic_value = self.critic.forward(state, action)
-
-        target = []
-        for j in range(self.batch_size):
-            target.append(reward[j] + self.gamma * critic_value_[j] * done[j])
-        target = T.tensor(target).to(self.critic.device)
-        target = target.view(self.batch_size, 1)
+        # 3) target Q-values (no grads into target nets)
+        with T.no_grad():
+            next_actions = self.target_actor(new_states)
+            q_next = self.target_critic(new_states, next_actions)
+            q_target = rewards + self.gamma * q_next * done
 
         # 4) critic update
         self.critic.train()
         self.critic.optimizer.zero_grad()
-        critic_loss = F.mse_loss(target, critic_value)
+        q_current = self.critic(states, actions)
+        critic_loss = F.mse_loss(q_current, q_target)
         critic_loss.backward()
         self.critic.optimizer.step()
 
         # 5) actor update
-        self.critic.eval()
-        self.actor.optimizer.zero_grad()
-        mu = self.actor.forward(state)
         self.actor.train()
-        actor_loss = -self.critic.forward(state, mu)
-        actor_loss = T.mean(actor_loss)
+        self.actor.optimizer.zero_grad()
+        mu = self.actor(states)
+        actor_loss = -self.critic(states, mu).mean()
         actor_loss.backward()
         self.actor.optimizer.step()
 
-        self.update_network_parameters()
-
-        # 6) soft update
+        # 6) single soft update of target networks
         self.update_network_parameters()
 
     def update_network_parameters(self, tau=None):
