@@ -84,7 +84,7 @@ class PushTEnv(gym.Env):
 
     ```python
     >>> import gymnasium as gym
-    >>> import gym_pusht
+    # >>> import gym_pusht
     >>> env = gym.make("gym_pusht/PushT-v0", obs_type="state", render_mode="rgb_array")
     >>> env
     <TimeLimit<OrderEnforcing<PassiveEnvChecker<PushTEnv<gym_pusht/PushT-v0>>>>>
@@ -115,7 +115,7 @@ class PushTEnv(gym.Env):
 
     ```python
     >>> import gymnasium as gym
-    >>> import gym_pusht
+    # >>> import gym_pusht
     >>> env = gym.make("gym_pusht/PushT-v0")
     >>> state, _ = env.reset(options={"reset_to_state": [0.0, 10.0, 20.0, 30.0, 1.0]})
     >>> state
@@ -129,7 +129,6 @@ class PushTEnv(gym.Env):
 
     ## References
 
-    * TODO:
     """
 
     metadata = {"render_modes": RENDER_MODES, "render_fps": 10}
@@ -486,7 +485,6 @@ class PushTEnv(gym.Env):
 
     @staticmethod
     def add_segment(space, a, b, radius):
-        # TODO(rcadene): rename add_segment to make_segment, since it is not added to the space
         shape = pymunk.Segment(space.static_body, a, b, radius)
         shape.color = pygame.Color("LightGray")  # https://htmlcolorcodes.com/color-names
         return shape
