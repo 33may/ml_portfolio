@@ -16,7 +16,7 @@ class OUActionNoise(object):
         self.sigma = sigma
         self.dt = dt
         self.x0 = x0
-        self.reset()
+        self.x_prev = x0
 
     def __call__(self):
         x = self.x_prev + self.theta * (self.mu - self.x_prev) * self.dt + \
@@ -24,44 +24,36 @@ class OUActionNoise(object):
         self.x_prev = x
         return x
 
-    def reset(self):
-        self.x_prev = self.x0 if self.x0 is not None else np.zeros_like(self.mu)
+class ReplayBuffer:
+    def __init__(self, max_size, obs_dim, action_dim):
+        self.max_size = max_size
+        self.ptr = 0
+        self.state_buf = np.zeros((self.max_size, obs_dim))
+        self.next_state_buf = np.zeros((self.max_size, obs_dim))
+        self.action_buf = np.zeros((self.max_size, action_dim))
+        self.reward_buf = np.zeros(self.max_size)
+        self.done_buf = np.zeros(self.max_size, dtype=np.float32)
 
-    def __repr__(self):
-        return 'OrnsteinUhlenbeckActionNoise(mu={}, sigma={})'.format(
-                                                            self.mu, self.sigma)
-
-class ReplayBuffer(object):
-    def __init__(self, max_size, input_shape, n_actions):
-        self.mem_size = max_size
-        self.mem_cntr = 0
-        self.state_memory = np.zeros((self.mem_size, input_shape))
-        self.new_state_memory = np.zeros((self.mem_size, input_shape))
-        self.action_memory = np.zeros((self.mem_size, n_actions))
-        self.reward_memory = np.zeros(self.mem_size)
-        self.terminal_memory = np.zeros(self.mem_size, dtype=np.float32)
-
-    def store_transition(self, state, action, reward, state_, done):
-        index = self.mem_cntr % self.mem_size
-        self.state_memory[index] = state
-        self.new_state_memory[index] = state_
-        self.action_memory[index] = action
-        self.reward_memory[index] = reward
-        self.terminal_memory[index] = 1 - done
-        self.mem_cntr += 1
+    def store_transition(self, state, action, reward, next_state, done):
+        idx = self.ptr % self.max_size
+        self.state_buf[idx] = state
+        self.next_state_buf[idx] = next_state
+        self.action_buf[idx] = action
+        self.reward_buf[idx] = reward
+        self.done_buf[idx] = 1 - done
+        self.ptr += 1
 
     def sample_buffer(self, batch_size):
-        max_mem = min(self.mem_cntr, self.mem_size)
+        max_idx = min(self.ptr, self.max_size)
+        batch_idxs = np.random.choice(max_idx, batch_size)
 
-        batch = np.random.choice(max_mem, batch_size)
-
-        states = self.state_memory[batch]
-        actions = self.action_memory[batch]
-        rewards = self.reward_memory[batch]
-        states_ = self.new_state_memory[batch]
-        terminal = self.terminal_memory[batch]
-
-        return states, actions, rewards, states_, terminal
+        return (
+            self.state_buf[batch_idxs],
+            self.action_buf[batch_idxs],
+            self.reward_buf[batch_idxs],
+            self.next_state_buf[batch_idxs],
+            self.done_buf[batch_idxs],
+        )
 
 
 class CriticNetwork(nn.Module):
@@ -140,7 +132,7 @@ class ActorNetwork(nn.Module):
 
 class Agent(object):
     def __init__(self, alpha, beta, input_dims, tau, noise, gamma=0.99,
-                 n_actions=2, max_size=1000000, batch_size=256,
+                 n_actions=2, max_size=10000, batch_size=256,
                  expert_data=None, expert_ratio=0.25):
         self.gamma = gamma
         self.tau = tau
@@ -153,7 +145,7 @@ class Agent(object):
         self.target_actor = ActorNetwork(alpha, input_dims, n_actions)
         self.target_critic = CriticNetwork(beta, input_dims, n_actions)
 
-        self.noise = OUActionNoise(mu=np.zeros(n_actions), sigma=noise)
+        self.noise = OUActionNoise(mu=np.zeros(n_actions), sigma=noise, x0=np.zeros(n_actions))
 
         self.update_network_parameters(tau=1)
 
@@ -168,6 +160,7 @@ class Agent(object):
         noise = self.noise()
 
         mu_prime = mu + T.tensor(noise, dtype=T.float).to(self.actor.device) if not eval else mu
+
         self.actor.train()
         return mu_prime.cpu().detach().numpy()
 
@@ -176,11 +169,9 @@ class Agent(object):
         self.memory.store_transition(state, action, reward, new_state, done)
 
     def sample_mixed_batch(self):
-        # number of expert and live samples
         exp_bs = int(self.expert_ratio * self.batch_size)
         live_bs = self.batch_size - exp_bs
 
-        # sample expert (with replacement if needed)
         expert_batch = random.choices(self.expert_data, k=exp_bs) if len(self.expert_data) > 0 else []
         if expert_batch:
             exp_s, exp_a, exp_r, exp_d, exp_s2 = zip(*expert_batch)
@@ -192,17 +183,14 @@ class Agent(object):
         else:
             exp_s = exp_a = exp_r = exp_s2 = exp_d = np.zeros((0,))
 
-        # sample live from replay buffer
         ls, la, lrw, ls2, ld = self.memory.sample_buffer(live_bs)
 
-        # concatenate
         states = np.vstack([exp_s, ls])
         actions = np.vstack([exp_a, la])
         rewards = np.concatenate([exp_r, lrw])
         states_ = np.vstack([exp_s2, ls2])
         dones = np.concatenate([exp_d, ld])
 
-        # shuffle
         perm = np.random.permutation(self.batch_size)
         return (
             states[perm],
@@ -216,11 +204,9 @@ class Agent(object):
         if self.memory.mem_cntr < self.batch_size:
             return
 
-        # 1) sample batch
         states, actions, rewards, new_states, done = \
             self.memory.sample_buffer(self.batch_size)
 
-        # 2) convert to tensors & reshape
         dev = self.critic.device
         states = T.tensor(states, dtype=T.float32, device=dev)
         actions = T.tensor(actions, dtype=T.float32, device=dev)
@@ -228,13 +214,11 @@ class Agent(object):
         new_states = T.tensor(new_states, dtype=T.float32, device=dev)
         done = T.tensor(done, dtype=T.float32, device=dev).view(-1, 1)
 
-        # 3) target Q-values (no grads into target nets)
         with T.no_grad():
             next_actions = self.target_actor(new_states)
             q_next = self.target_critic(new_states, next_actions)
             q_target = rewards + self.gamma * q_next * done
 
-        # 4) critic update
         self.critic.train()
         self.critic.optimizer.zero_grad()
         q_current = self.critic(states, actions)
@@ -242,7 +226,6 @@ class Agent(object):
         critic_loss.backward()
         self.critic.optimizer.step()
 
-        # 5) actor update
         self.actor.train()
         self.actor.optimizer.zero_grad()
         mu = self.actor(states)
@@ -250,30 +233,13 @@ class Agent(object):
         actor_loss.backward()
         self.actor.optimizer.step()
 
-        # 6) single soft update of target networks
         self.update_network_parameters()
 
     def update_network_parameters(self, tau=None):
-        if tau is None:
-            tau = self.tau
+        tau = self.tau if tau is None else tau
 
-        actor_params = self.actor.named_parameters()
-        critic_params = self.critic.named_parameters()
-        target_actor_params = self.target_actor.named_parameters()
-        target_critic_params = self.target_critic.named_parameters()
+        for target_param, param in zip(self.target_critic.parameters(), self.critic.parameters()):
+            target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
 
-        critic_state_dict = dict(critic_params)
-        actor_state_dict = dict(actor_params)
-        target_critic_dict = dict(target_critic_params)
-        target_actor_dict = dict(target_actor_params)
-
-        for name in critic_state_dict:
-            critic_state_dict[name] = tau*critic_state_dict[name].clone() + \
-                                      (1-tau)*target_critic_dict[name].clone()
-
-        self.target_critic.load_state_dict(critic_state_dict)
-
-        for name in actor_state_dict:
-            actor_state_dict[name] = tau*actor_state_dict[name].clone() + \
-                                      (1-tau)*target_actor_dict[name].clone()
-        self.target_actor.load_state_dict(actor_state_dict)
+        for target_param, param in zip(self.target_actor.parameters(), self.actor.parameters()):
+            target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)

@@ -149,7 +149,6 @@ class MCTSNode:
         Prepares tensors and scalars for the network based on this node's state.
         Example: depth, previous actions, etc.
         """
-        # TODO: Implement based on your model's expected input format
         raise NotImplementedError
 
 
@@ -194,5 +193,4 @@ class MCTS:
         Return value for a terminal state.
         You might define it as -1 * steps left or 0 if perfect solution.
         """
-        # TODO: Customize this based on your task (e.g., reward based on remaining error)
-        return 0.0  # placeholder
+        return 0.0
