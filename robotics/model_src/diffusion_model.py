@@ -59,7 +59,7 @@ class Downsample1D(nn.Module):
 class Upsample1D(nn.Module):
     def __init__(self, dim):
         super().__init__()
-        self.conv = nn.ConvTranspose1d(dim, dim, 3, 2, 1)
+        self.conv = nn.ConvTranspose1d(dim, dim, 4, 2, 1)
 
     def forward(self, x):
         return self.conv(x)
@@ -256,3 +256,8 @@ class ConditionalUnet1D(nn.Module):
         x = x.moveaxis(-1,-2)
         # (B,T,C)
         return x
+
+
+# class DDPMScheduler():
+#     def __init__(self):
+#         self.step = 0
