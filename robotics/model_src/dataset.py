@@ -69,14 +69,14 @@ class PushTDataset(Dataset):
 
         # --- images ---------------------------------------------------------
         image_data = dataset["data"]["img"][:] # ndarray [0-255], shape = (total, 224, 224, 3)
-        self.image_data_transformed = normalize_data(image_data, 255) # ndarray [0-1], shape = (total, 224, 224, 3)
+        self.image_data_transformed = normalize_data(image_data, 255).astype(np.float32) # ndarray [0-1], shape = (total, 224, 224, 3)
 
         # --- actions --------------------------------------------------------
         actions_data = dataset["data"]["action"][:] # ndarray [0-512], shape = (total, 2)
-        self.actions_data_transformed = normalize_data(actions_data, 512) # ndarray [0-1], shape = (total, 2)
+        self.actions_data_transformed = normalize_data(actions_data, 512).astype(np.float32) # ndarray [0-1], shape = (total, 2)
 
         # --- windows --------------------------------------------------------
-        self.episode_ends = dataset["episode_ends"][:]
+        self.episode_ends = dataset["episode_ends"][:] - 1
         self.indexes = create_trajectory_indices(self.episode_ends, obs_horizon, prediction_horizon)
 
     # total number of windows

@@ -62,7 +62,7 @@ class CLIPVisualEncoder(VisualEncoderBase):
         self.model.eval().to(self.device)
 
     def preprocess(self, image):
-        inputs = self.processor(images=image, return_tensors="pt")
+        inputs = self.processor(images=image, return_tensors="pt", do_rescale=False)
         return inputs["pixel_values"].to(self.device)
 
     def encode(self, image_tensor):

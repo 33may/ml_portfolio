@@ -1,3 +1,6 @@
+import math
+from dataclasses import dataclass
+
 import torch
 from torch import nn
 
@@ -258,6 +261,76 @@ class ConditionalUnet1D(nn.Module):
         return x
 
 
-# class DDPMScheduler():
-#     def __init__(self):
-#         self.step = 0
+def cosine_betas(T: int, max_beta: float = 0.999, device="cpu") -> torch.Tensor:
+    """Cosine schedule from Nichol & Dhariwal (2021)."""
+    s = 0.008
+    steps = torch.arange(T + 1, dtype=torch.float32, device=device)
+    alphas_bar = torch.cos((steps / T + s) / (1 + s) * math.pi / 2) ** 2
+    betas = 1 - alphas_bar[1:] / alphas_bar[:-1]
+    return betas.clamp(max=max_beta)
+
+
+@dataclass
+class Config:
+    T: int = 1000  # number of training timesteps
+    device: str = "cpu"  # "cuda" or "cpu"
+
+class CosineDDPMScheduler:
+    """Minimal DDPM scheduler (cosine β schedule, ε-prediction only)."""
+
+    def __init__(self, cfg: Config):
+        self.config = cfg
+
+        self.device = torch.device(cfg.device)
+        betas = cosine_betas(cfg.T, device=self.device)
+
+        alphas = 1.0 - betas
+        alpha_bar = torch.cumprod(alphas, dim=0)
+
+        # Pre-compute frequently used terms
+        self.betas = betas
+        self.sqrt_alpha_bar = torch.sqrt(alpha_bar)
+        self.sqrt_one_minus_alpha_bar = torch.sqrt(1 - alpha_bar)
+
+        # Posterior variance for p(x_{t-1}|x_t,x_0) (original DDPM formula)
+        alpha_bar_prev = torch.cat([torch.ones(1, device=self.device), alpha_bar[:-1]])
+        self.posterior_var = (
+                betas * (1 - alpha_bar_prev) / (1 - alpha_bar)
+        )
+
+        # default inference schedule = all steps reversed
+        self.timesteps = torch.arange(cfg.T - 1, -1, -1, device=self.device)
+
+    # ---------- public API --------------------------------------------------
+
+    @torch.no_grad()
+    def add_noise(self, x0: torch.Tensor, eps: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """q(x_t | x_0) = sqrt(ᾱ_t)·x0 + sqrt(1-ᾱ_t)·eps"""
+        sqrt_ab = self.sqrt_alpha_bar[t].view(-1, 1, 1)
+        sqrt_om = self.sqrt_one_minus_alpha_bar[t].view(-1, 1, 1)
+        return sqrt_ab * x0 + sqrt_om * eps
+
+    @torch.no_grad()
+    def step(self, eps_pred: torch.Tensor, t: torch.Tensor, x_t: torch.Tensor) -> torch.Tensor:
+        """Single reverse step pθ(x_{t-1}|x_t) using ε-prediction."""
+        b_t = self.betas[t].view(-1, 1, 1, 1)
+        sqrt_ab = self.sqrt_alpha_bar[t].view(-1, 1, 1, 1)
+        sqrt_om = self.sqrt_one_minus_alpha_bar[t].view(-1, 1, 1, 1)
+
+        # x0 prediction from ε
+        x0_pred = (x_t - sqrt_om * eps_pred) / sqrt_ab
+
+        # coefficients for mean of pθ
+        coef1 = (torch.sqrt(alpha_bar_prev := torch.cat(
+            [torch.ones_like(t[:1], dtype=torch.float32), self.sqrt_alpha_bar[t][:-1] ** 2]
+        )) * b_t / (1 - alpha_bar_prev[t]).view(-1, 1, 1, 1))
+        coef2 = (torch.sqrt(alphas := 1. - self.betas[t]).view(-1, 1, 1, 1) *
+                 (1 - alpha_bar_prev[t]).view(-1, 1, 1, 1) /
+                 (1 - alpha_bar_prev[t]).view(-1, 1, 1, 1))
+
+        mean = coef1 * x0_pred + coef2 * x_t
+        var = self.posterior_var[t].view(-1, 1, 1, 1)
+
+        noise = torch.randn_like(x_t) if (t > 0).any() else 0.0
+        return mean + torch.sqrt(var) * noise
+
