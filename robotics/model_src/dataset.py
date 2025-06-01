@@ -42,14 +42,16 @@ def create_trajectory_indices(episode_ends: np.ndarray,
     return np.concatenate(all_windows, axis=0) # (N, W)
 
 
-def normalize_data(arr, scale):
+def normalize_data(arr, scale, dtype=np.float32):
     # map raw values from [0, scale] into canonical [0, 1] range
-    return arr / scale
+    return arr.astype(dtype, copy=False) / scale
 
 
-def denormalize_data(arr, scale):
+
+
+def denormalize_data(arr, scale, dtype=np.float32):
     # recover original units by reversing the previous scaling
-    return arr * scale
+    return arr.astype(dtype, copy=False) * scale
 
 
 # ---------- dataset -----------------------------------------------------------
@@ -61,22 +63,29 @@ class PushTDataset(Dataset):
         act_pred – actions for the prediction horizon (ph, 2)
     All indices are pre‑computed once in create_trajectory_indices().
     """
-    def __init__(self, data_path, obs_horizon, prediction_horizon, image_size = None):
+    def __init__(self, data_path, obs_horizon, prediction_horizon, image_size = None, images = None, actions = None, episode_ends = None):
         self.obs_horizon = obs_horizon
         self.prediction_horizon = prediction_horizon
 
-        dataset = zarr.open(data_path, mode="r") # action, img, keypoint, n_contacts, state
+        dataset = zarr.open(data_path, mode="r")  # action, img, keypoint, n_contacts, state
+
+        if data_path:
+            image_data = dataset["data"]["img"][:]  # ndarray [0-255], shape = (total, 224, 224, 3)
+            image_data = np.moveaxis(image_data, -1, 1)
+            actions_data = dataset["data"]["action"][:]  # ndarray [0-512], shape = (total, 2)
+            self.episode_ends = dataset['meta']['episode_ends'][:] - 1
+        else:
+            image_data = images
+            actions_data = actions
+            self.episode_ends = episode_ends[:] - 1
 
         # --- images ---------------------------------------------------------
-        image_data = dataset["data"]["img"][:] # ndarray [0-255], shape = (total, 224, 224, 3)
         self.image_data_transformed = normalize_data(image_data, 255).astype(np.float32) # ndarray [0-1], shape = (total, 224, 224, 3)
 
         # --- actions --------------------------------------------------------
-        actions_data = dataset["data"]["action"][:] # ndarray [0-512], shape = (total, 2)
         self.actions_data_transformed = normalize_data(actions_data, 512).astype(np.float32) # ndarray [0-1], shape = (total, 2)
 
         # --- windows --------------------------------------------------------
-        self.episode_ends = dataset["episode_ends"][:] - 1
         self.indexes = create_trajectory_indices(self.episode_ends, obs_horizon, prediction_horizon)
 
     # total number of windows

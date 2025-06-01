@@ -69,11 +69,12 @@ class Upsample1D(nn.Module):
 
 
 class Conv1DBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, ker_size):
+    def __init__(self, inp_channels, out_channels, ker_size, n_groups=8):
         super().__init__()
+
         self.block = nn.Sequential(
-            nn.Conv1d(in_channels, out_channels, ker_size, padding=ker_size//2),
-            nn.BatchNorm1d(out_channels),
+            nn.Conv1d(inp_channels, out_channels, ker_size, padding=ker_size // 2),
+            nn.GroupNorm(n_groups, out_channels),
             nn.Mish(),
         )
 
@@ -273,7 +274,7 @@ def cosine_betas(T: int, max_beta: float = 0.999, device="cpu") -> torch.Tensor:
 @dataclass
 class Config:
     T: int = 1000  # number of training timesteps
-    device: str = "cpu"  # "cuda" or "cpu"
+    device: str = "cpu"
 
 class CosineDDPMScheduler:
     """Minimal DDPM scheduler (cosine β schedule, ε-prediction only)."""
@@ -312,25 +313,38 @@ class CosineDDPMScheduler:
 
     @torch.no_grad()
     def step(self, eps_pred: torch.Tensor, t: torch.Tensor, x_t: torch.Tensor) -> torch.Tensor:
-        """Single reverse step pθ(x_{t-1}|x_t) using ε-prediction."""
-        b_t = self.betas[t].view(-1, 1, 1, 1)
-        sqrt_ab = self.sqrt_alpha_bar[t].view(-1, 1, 1, 1)
-        sqrt_om = self.sqrt_one_minus_alpha_bar[t].view(-1, 1, 1, 1)
+        """
+        Reverse-step pθ(x_{t-1}|x_t) для косинусного DDPM.
+        t: (B,) long      x_t: (B, C, H, W)
+        """
+        # --- табличные значения для текущего k -------------------------------
+        beta_t = self.betas[t].view(-1, 1, 1, 1)  # β_t
+        sqrt_ab_t = self.sqrt_alpha_bar[t].view(-1, 1, 1, 1)  # √ᾱ_t
+        sqrt_omab_t = self.sqrt_one_minus_alpha_bar[t].view(-1, 1, 1, 1)
 
-        # x0 prediction from ε
-        x0_pred = (x_t - sqrt_om * eps_pred) / sqrt_ab
+        # --- √ᾱ_{t-1} --------------------------------------------------------
+        # t  shape (B,)  — все t ≥ 1
+        sqrt_ab_prev = self.sqrt_alpha_bar[t - 1].view(-1, 1, 1, 1)  # (B,1,1,1)
+        alpha_bar_prev = sqrt_ab_prev ** 2
 
-        # coefficients for mean of pθ
-        coef1 = (torch.sqrt(alpha_bar_prev := torch.cat(
-            [torch.ones_like(t[:1], dtype=torch.float32), self.sqrt_alpha_bar[t][:-1] ** 2]
-        )) * b_t / (1 - alpha_bar_prev[t]).view(-1, 1, 1, 1))
-        coef2 = (torch.sqrt(alphas := 1. - self.betas[t]).view(-1, 1, 1, 1) *
-                 (1 - alpha_bar_prev[t]).view(-1, 1, 1, 1) /
-                 (1 - alpha_bar_prev[t]).view(-1, 1, 1, 1))
+        # --- предсказание x₀ из ε̂ -------------------------------------------
+        x0_pred = (x_t - sqrt_omab_t * eps_pred) / sqrt_ab_t  # Eq.(15)
 
+        # --- коэффициенты μ_θ(x_t) ------------------------------------------
+
+        alpha_t = 1.0 - beta_t  # α_t
+
+        alpha_bar_t = sqrt_ab_t ** 2  # ᾱ_t
+        coef1 = (sqrt_ab_prev * beta_t) / (1.0 - alpha_bar_prev + 1e-8)
+        coef2 = torch.sqrt(alpha_t) * (1.0 - alpha_bar_prev) / (1.0 - alpha_bar_t + 1e-8)
+
+        # Eq.(7)
         mean = coef1 * x0_pred + coef2 * x_t
-        var = self.posterior_var[t].view(-1, 1, 1, 1)
 
-        noise = torch.randn_like(x_t) if (t > 0).any() else 0.0
-        return mean + torch.sqrt(var) * noise
+        # --- дисперсия и шум --------------------------------------------------
+        var = self.posterior_var[t].view(-1, 1, 1, 1)
+        noise = torch.randn_like(x_t) * (t > 0).float().view(-1, 1, 1, 1)
+
+        return mean + torch.sqrt(var) * noise  # x_{t-1}
+
 

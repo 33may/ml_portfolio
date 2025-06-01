@@ -1,523 +1,537 @@
-import collections
-import os
-import warnings
-
 import cv2
-import gymnasium as gym
+import gym
 import numpy as np
-
-with warnings.catch_warnings():
-    # Filter out DeprecationWarnings raised from pkg_resources
-    warnings.filterwarnings("ignore", "pkg_resources is deprecated as an API", category=DeprecationWarning)
-    import pygame
-
+from gym import spaces
 import pymunk
+from pymunk.space_debug_draw_options import SpaceDebugColor
+from pymunk import Vec2d
+from typing import Tuple, Sequence
+
+import pygame
 import pymunk.pygame_util
+
 import shapely.geometry as sg
-from gymnasium import spaces
-from pymunk.vec2d import Vec2d
+import skimage.transform as st
 
-from .pymunk_override import DrawOptions
+import pymunk.pygame_util
 
-RENDER_MODES = ["rgb_array"]
-if os.environ.get("MUJOCO_GL") != "egl":
-    RENDER_MODES.append("human")
+positive_y_is_up: bool = False
+
+def to_pygame(p: Tuple[float, float], surface: pygame.Surface) -> Tuple[int, int]:
+    """Convenience method to convert pymunk coordinates to pygame surface
+    local coordinates.
+
+    Note that in case positive_y_is_up is False, this function wont actually do
+    anything except converting the point to integers.
+    """
+    if positive_y_is_up:
+        return round(p[0]), surface.get_height() - round(p[1])
+    else:
+        return round(p[0]), round(p[1])
+
+
+def light_color(color: SpaceDebugColor):
+    color = np.minimum(1.2 * np.float32([color.r, color.g, color.b, color.a]), np.float32([255]))
+    color = SpaceDebugColor(r=color[0], g=color[1], b=color[2], a=color[3])
+    return color
+
+
+class DrawOptions(pymunk.SpaceDebugDrawOptions):
+    def __init__(self, surface: pygame.Surface) -> None:
+        """Draw a pymunk.Space on a pygame.Surface object.
+
+        Typical usage::
+
+        >>> import pymunk
+        >>> surface = pygame.Surface((10,10))
+        >>> space = pymunk.Space()
+        >>> options = pymunk.pygame_util.DrawOptions(surface)
+        >>> space.debug_draw(options)
+
+        You can control the color of a shape by setting shape.color to the color
+        you want it drawn in::
+
+        >>> c = pymunk.Circle(None, 10)
+        >>> c.color = pygame.Color("pink")
+
+        See pygame_util.demo.py for a full example
+
+        Since pygame uses a coordiante system where y points down (in contrast
+        to many other cases), you either have to make the physics simulation
+        with Pymunk also behave in that way, or flip everything when you draw.
+
+        The easiest is probably to just make the simulation behave the same
+        way as Pygame does. In that way all coordinates used are in the same
+        orientation and easy to reason about::
+
+        >>> space = pymunk.Space()
+        >>> space.gravity = (0, -1000)
+        >>> body = pymunk.Body()
+        >>> body.position = (0, 0) # will be positioned in the top left corner
+        >>> space.debug_draw(options)
+
+        To flip the drawing its possible to set the module property
+        :py:data:`positive_y_is_up` to True. Then the pygame drawing will flip
+        the simulation upside down before drawing::
+
+        >>> positive_y_is_up = True
+        >>> body = pymunk.Body()
+        >>> body.position = (0, 0)
+        >>> # Body will be position in bottom left corner
+
+        :Parameters:
+                surface : pygame.Surface
+                    Surface that the objects will be drawn on
+        """
+        self.surface = surface
+        super(DrawOptions, self).__init__()
+
+    def draw_circle(
+            self,
+            pos: Vec2d,
+            angle: float,
+            radius: float,
+            outline_color: SpaceDebugColor,
+            fill_color: SpaceDebugColor,
+    ) -> None:
+        p = to_pygame(pos, self.surface)
+
+        pygame.draw.circle(self.surface, fill_color.as_int(), p, round(radius), 0)
+        pygame.draw.circle(self.surface, light_color(fill_color).as_int(), p, round(radius - 4), 0)
+
+        circle_edge = pos + Vec2d(radius, 0).rotated(angle)
+        p2 = to_pygame(circle_edge, self.surface)
+        line_r = 2 if radius > 20 else 1
+        # pygame.draw.lines(self.surface, outline_color.as_int(), False, [p, p2], line_r)
+
+    def draw_segment(self, a: Vec2d, b: Vec2d, color: SpaceDebugColor) -> None:
+        p1 = to_pygame(a, self.surface)
+        p2 = to_pygame(b, self.surface)
+
+        pygame.draw.aalines(self.surface, color.as_int(), False, [p1, p2])
+
+    def draw_fat_segment(
+            self,
+            a: Tuple[float, float],
+            b: Tuple[float, float],
+            radius: float,
+            outline_color: SpaceDebugColor,
+            fill_color: SpaceDebugColor,
+    ) -> None:
+        p1 = to_pygame(a, self.surface)
+        p2 = to_pygame(b, self.surface)
+
+        r = round(max(1, radius * 2))
+        pygame.draw.lines(self.surface, fill_color.as_int(), False, [p1, p2], r)
+        if r > 2:
+            orthog = [abs(p2[1] - p1[1]), abs(p2[0] - p1[0])]
+            if orthog[0] == 0 and orthog[1] == 0:
+                return
+            scale = radius / (orthog[0] * orthog[0] + orthog[1] * orthog[1]) ** 0.5
+            orthog[0] = round(orthog[0] * scale)
+            orthog[1] = round(orthog[1] * scale)
+            points = [
+                (p1[0] - orthog[0], p1[1] - orthog[1]),
+                (p1[0] + orthog[0], p1[1] + orthog[1]),
+                (p2[0] + orthog[0], p2[1] + orthog[1]),
+                (p2[0] - orthog[0], p2[1] - orthog[1]),
+            ]
+            pygame.draw.polygon(self.surface, fill_color.as_int(), points)
+            pygame.draw.circle(
+                self.surface,
+                fill_color.as_int(),
+                (round(p1[0]), round(p1[1])),
+                round(radius),
+            )
+            pygame.draw.circle(
+                self.surface,
+                fill_color.as_int(),
+                (round(p2[0]), round(p2[1])),
+                round(radius),
+            )
+
+    def draw_polygon(
+            self,
+            verts: Sequence[Tuple[float, float]],
+            radius: float,
+            outline_color: SpaceDebugColor,
+            fill_color: SpaceDebugColor,
+    ) -> None:
+        ps = [to_pygame(v, self.surface) for v in verts]
+        ps += [ps[0]]
+
+        radius = 2
+        pygame.draw.polygon(self.surface, light_color(fill_color).as_int(), ps)
+
+        if radius > 0:
+            for i in range(len(verts)):
+                a = verts[i]
+                b = verts[(i + 1) % len(verts)]
+                self.draw_fat_segment(a, b, radius, fill_color, fill_color)
+
+    def draw_dot(
+            self, size: float, pos: Tuple[float, float], color: SpaceDebugColor
+    ) -> None:
+        p = to_pygame(pos, self.surface)
+        pygame.draw.circle(self.surface, color.as_int(), p, round(size), 0)
 
 
 def pymunk_to_shapely(body, shapes):
-    geoms = []
+    geoms = list()
     for shape in shapes:
         if isinstance(shape, pymunk.shapes.Poly):
             verts = [body.local_to_world(v) for v in shape.get_vertices()]
             verts += [verts[0]]
             geoms.append(sg.Polygon(verts))
         else:
-            raise RuntimeError(f"Unsupported shape type {type(shape)}")
+            raise RuntimeError(f'Unsupported shape type {type(shape)}')
     geom = sg.MultiPolygon(geoms)
     return geom
 
 
+# env
 class PushTEnv(gym.Env):
-    """
-    ## Description
+    metadata = {"render.modes": ["human", "rgb_array"], "video.frames_per_second": 10}
+    reward_range = (0., 1.)
 
-    PushT environment.
-
-    The goal of the agent is to push the block to the goal zone. The agent is a circle and the block is a tee shape.
-
-    ## Action Space
-
-    The action space is continuous and consists of two values: [x, y]. The values are in the range [0, 512] and
-    represent the target position of the agent.
-
-    ## Observation Space
-
-    If `obs_type` is set to `state`, the observation space is a 5-dimensional vector representing the state of the
-    environment: [agent_x, agent_y, block_x, block_y, block_angle]. The values are in the range [0, 512] for the agent
-    and block positions and [0, 2*pi] for the block angle.
-
-    If `obs_type` is set to `environment_state_agent_pos` the observation space is a dictionary with:
-    - `environment_state`: 16-dimensional vector representing the keypoint locations of the T (in [x0, y0, x1, y1, ...]
-        format). The values are in the range [0, 512]. See `get_keypoints` for a diagram showing the location of the
-        keypoint indices.
-    - `agent_pos`: A 2-dimensional vector representing the position of the robot end-effector.
-
-    If `obs_type` is set to `pixels`, the observation space is a 96x96 RGB image of the environment.
-
-    ## Rewards
-
-    The reward is the coverage of the block in the goal zone. The reward is 1.0 if the block is fully in the goal zone.
-
-    ## Success Criteria
-
-    The environment is considered solved if the block is at least 95% in the goal zone.
-
-    ## Starting State
-
-    The agent starts at a random position and the block starts at a random position and angle.
-
-    ## Episode Termination
-
-    The episode terminates when the block is at least 95% in the goal zone.
-
-    ## Arguments
-
-    ```python
-    >>> import gymnasium as gym
-    # >>> import gym_pusht
-    >>> env = gym.make("gym_pusht/PushT-v0", obs_type="state", render_mode="rgb_array")
-    >>> env
-    <TimeLimit<OrderEnforcing<PassiveEnvChecker<PushTEnv<gym_pusht/PushT-v0>>>>>
-    ```
-
-    * `obs_type`: (str) The observation type. Can be either `state`, `keypoints`, `pixels` or `pixels_agent_pos`.
-      Default is `state`.
-
-    * `block_cog`: (tuple) The center of gravity of the block if different from the center of mass. Default is `None`.
-
-    * `damping`: (float) The damping factor of the environment if different from 0. Default is `None`.
-
-    * `observation_width`: (int) The width of the observed image. Default is `96`.
-
-    * `observation_height`: (int) The height of the observed image. Default is `96`.
-
-    * `visualization_width`: (int) The width of the visualized image. Default is `680`.
-
-    * `visualization_height`: (int) The height of the visualized image. Default is `680`.
-
-    ## Reset Arguments
-
-    Passing the option `options["reset_to_state"]` will reset the environment to a specific state.
-
-    > [!WARNING]
-    > For legacy compatibility, the inner fonctionning has been preserved, and the state set is not the same as the
-    > the one passed in the argument.
-
-    ```python
-    >>> import gymnasium as gym
-    # >>> import gym_pusht
-    >>> env = gym.make("gym_pusht/PushT-v0")
-    >>> state, _ = env.reset(options={"reset_to_state": [0.0, 10.0, 20.0, 30.0, 1.0]})
-    >>> state
-    array([ 0.      , 10.      , 57.866196, 50.686398,  1.      ],
-          dtype=float32)
-    ```
-
-    ## Version History
-
-    * v0: Original version
-
-    ## References
-
-    """
-
-    metadata = {"render_modes": RENDER_MODES, "render_fps": 10}
-
-    def __init__(
-        self,
-        obs_type="state",
-        render_mode="rgb_array",
-        goal_pose="fixed",
-        block_cog=None,
-        damping=None,
-        observation_width=224,
-        observation_height=224,
-        visualization_width=680,
-        visualization_height=680,
-    ):
-        super().__init__()
-        # Observations
-        self.obs_type = obs_type
-
-        # Goal Pose
-        self.goal_mode = goal_pose
-
-        # Rendering
-        self.render_mode = render_mode
-        self.observation_width = observation_width
-        self.observation_height = observation_height
-        self.visualization_width = visualization_width
-        self.visualization_height = visualization_height
-
-        # Initialize spaces
-        self._initialize_observation_space()
-        self.action_space = spaces.Box(low=0, high=512, shape=(2,), dtype=np.float32)
-
-        # Physics
+    def __init__(self,
+                 legacy=False,
+                 block_cog=None, damping=None,
+                 render_action=True,
+                 render_size=96,
+                 reset_to_state=None
+                 ):
+        self._seed = None
+        self.seed()
+        self.window_size = ws = 512  # The size of the PyGame window
+        self.render_size = render_size
+        self.sim_hz = 100
+        # Local controller params.
         self.k_p, self.k_v = 100, 20  # PD control.z
-        self.control_hz = self.metadata["render_fps"]
-        self.dt = 0.01
+        self.control_hz = self.metadata['video.frames_per_second']
+        # legcay set_state for data compatiblity
+        self.legacy = legacy
+
+        # agent_pos, block_pos, block_angle
+        self.observation_space = spaces.Box(
+            low=np.array([0, 0, 0, 0, 0], dtype=np.float64),
+            high=np.array([ws, ws, ws, ws, np.pi * 2], dtype=np.float64),
+            shape=(5,),
+            dtype=np.float64
+        )
+
+        # positional goal for agent
+        self.action_space = spaces.Box(
+            low=np.array([0, 0], dtype=np.float64),
+            high=np.array([ws, ws], dtype=np.float64),
+            shape=(2,),
+            dtype=np.float64
+        )
+
         self.block_cog = block_cog
         self.damping = damping
+        self.render_action = render_action
 
-        # If human-rendering is used, `self.window` will be a reference
-        # to the window that we draw to. `self.clock` will be a clock that is used
-        # to ensure that the environment is rendered at the correct framerate in
-        # human-mode. They will remain `None` until human-mode is used for the
-        # first time.
+        """
+        If human-rendering is used, `self.window` will be a reference
+        to the window that we draw to. `self.clock` will be a clock that is used
+        to ensure that the environment is rendered at the correct framerate in
+        human-mode. They will remain `None` until human-mode is used for the
+        first time.
+        """
         self.window = None
         self.clock = None
+        self.screen = None
 
+        self.space = None
         self.teleop = None
-        self._last_action = None
+        self.render_buffer = None
+        self.latest_action = None
+        self.reset_to_state = reset_to_state
 
-        self.success_threshold = 0.95  # 95% coverage
-
-    def _initialize_observation_space(self):
-        if self.obs_type == "state":
-            # [agent_x, agent_y, block_x, block_y, block_angle]
-            self.observation_space = spaces.Box(
-                low=np.array([0, 0, 0, 0, 0]),
-                high=np.array([512, 512, 512, 512, 2 * np.pi]),
-                dtype=np.float64,
-            )
-        elif self.obs_type == "environment_state_agent_pos":
-            self.observation_space = spaces.Dict(
-                {
-                    "environment_state": spaces.Box(
-                        low=np.zeros(16),
-                        high=np.full((16,), 512),
-                        dtype=np.float64,
-                    ),
-                    "agent_pos": spaces.Box(
-                        low=np.array([0, 0]),
-                        high=np.array([512, 512]),
-                        dtype=np.float64,
-                    ),
-                },
-            )
-        elif self.obs_type == "pixels":
-            self.observation_space = spaces.Box(
-                low=0, high=255, shape=(self.observation_height, self.observation_width, 3), dtype=np.uint8
-            )
-        elif self.obs_type == "pixels_agent_pos":
-            self.observation_space = spaces.Dict(
-                {
-                    "pixels": spaces.Box(
-                        low=0,
-                        high=255,
-                        shape=(self.observation_height, self.observation_width, 3),
-                        dtype=np.uint8,
-                    ),
-                    "agent_pos": spaces.Box(
-                        low=np.array([0, 0]),
-                        high=np.array([512, 512]),
-                        dtype=np.float64,
-                    ),
-                }
-            )
-        else:
-            raise ValueError(
-                f"Unknown obs_type {self.obs_type}. Must be one of [pixels, state, environment_state_agent_pos, "
-                "pixels_agent_pos]"
-            )
-
-    def _get_coverage(self):
-        goal_body = self.get_goal_pose_body(self.goal_pose)
-        goal_geom = pymunk_to_shapely(goal_body, self.block.shapes)
-        block_geom = pymunk_to_shapely(self.block, self.block.shapes)
-        intersection_area = goal_geom.intersection(block_geom).area
-        goal_area = goal_geom.area
-        return intersection_area / goal_area
-
-    def step(self, action):
-        self.n_contact_points = 0
-        n_steps = int(1 / (self.dt * self.control_hz))
-        self._last_action = action
-        for _ in range(n_steps):
-            # Step PD control
-            # self.agent.velocity = self.k_p * (act - self.agent.position)    # P control works too.
-            acceleration = self.k_p * (action - self.agent.position) + self.k_v * (
-                Vec2d(0, 0) - self.agent.velocity
-            )
-            self.agent.velocity += acceleration * self.dt
-
-            # Step physics
-            self.space.step(self.dt)
-
-        # Compute reward
-        coverage = self._get_coverage()
-        reward = np.clip(coverage / self.success_threshold, 0.0, 1.0)
-        terminated = is_success = coverage > self.success_threshold
-
-        observation = self.get_obs()
-        info = self._get_info()
-        info["is_success"] = is_success
-        info["coverage"] = coverage
-
-        truncated = False
-        return observation, reward, terminated, truncated, info
-
-    def reset(self, seed=None, options=None):
-        super().reset(seed=seed)
+    def reset(self):
+        seed = self._seed
         self._setup()
+        if self.block_cog is not None:
+            self.block.center_of_gravity = self.block_cog
+        if self.damping is not None:
+            self.space.damping = self.damping
 
-        if options is not None and options.get("reset_to_state") is not None:
-            state = np.array(options.get("reset_to_state"))
-        else:
-            # state = self.np_random.uniform(low=[50, 50, 100, 100, -np.pi], high=[450, 450, 400, 400, np.pi])
+        # use legacy RandomState for compatiblity
+        state = self.reset_to_state
+        if state is None:
             rs = np.random.RandomState(seed=seed)
-            state = np.array(
-                [
-                    rs.randint(50, 450),
-                    rs.randint(50, 450),
-                    rs.randint(100, 400),
-                    rs.randint(100, 400),
-                    rs.randn() * 2 * np.pi - np.pi,
-                ],
-                # dtype=np.float64
-            )
+            state = np.array([
+                rs.randint(50, 450), rs.randint(50, 450),
+                rs.randint(100, 400), rs.randint(100, 400),
+                rs.randn() * 2 * np.pi - np.pi
+            ])
         self._set_state(state)
 
-        observation = self.get_obs()
+        obs = self._get_obs()
         info = self._get_info()
-        info["is_success"] = False
+        return obs, info
 
-        if self.render_mode == "human":
-            self.render()
+    def step(self, action):
+        dt = 1.0 / self.sim_hz
+        self.n_contact_points = 0
+        n_steps = self.sim_hz // self.control_hz
+        if action is not None:
+            self.latest_action = action
+            for i in range(n_steps):
+                # Step PD control.
+                # self.agent.velocity = self.k_p * (act - self.agent.position)    # P control works too.
+                acceleration = self.k_p * (action - self.agent.position) + self.k_v * (
+                            Vec2d(0, 0) - self.agent.velocity)
+                self.agent.velocity += acceleration * dt
 
-        return observation, info
+                # Step physics.
+                self.space.step(dt)
 
-    def _draw(self):
-        # Create a screen
-        screen = pygame.Surface((512, 512))
-        screen.fill((255, 255, 255))
-        draw_options = DrawOptions(screen)
+        # compute reward
+        goal_body = self._get_goal_pose_body(self.goal_pose)
+        goal_geom = pymunk_to_shapely(goal_body, self.block.shapes)
+        block_geom = pymunk_to_shapely(self.block, self.block.shapes)
 
-        # Draw goal pose
-        goal_body = self.get_goal_pose_body(self.goal_pose)
+        intersection_area = goal_geom.intersection(block_geom).area
+        goal_area = goal_geom.area
+        coverage = intersection_area / goal_area
+        reward = np.clip(coverage / self.success_threshold, 0, 1)
+        done = coverage > self.success_threshold
+        terminated = done
+        truncated = done
+
+        observation = self._get_obs()
+        info = self._get_info()
+
+        return observation, reward, terminated, truncated, info
+
+    def render(self, mode):
+        return self._render_frame(mode)
+
+    def teleop_agent(self):
+        TeleopAgent = collections.namedtuple('TeleopAgent', ['act'])
+
+        def act(obs):
+            act = None
+            mouse_position = pymunk.pygame_util.from_pygame(Vec2d(*pygame.mouse.get_pos()), self.screen)
+            if self.teleop or (mouse_position - self.agent.position).length < 30:
+                self.teleop = True
+                act = mouse_position
+            return act
+
+        return TeleopAgent(act)
+
+    def _get_obs(self):
+        obs = np.array(
+            tuple(self.agent.position) \
+            + tuple(self.block.position) \
+            + (self.block.angle % (2 * np.pi),))
+        return obs
+
+    def _get_goal_pose_body(self, pose):
+        mass = 1
+        inertia = pymunk.moment_for_box(mass, (50, 100))
+        body = pymunk.Body(mass, inertia)
+        # preserving the legacy assignment order for compatibility
+        # the order here dosn't matter somehow, maybe because CoM is aligned with body origin
+        body.position = pose[:2].tolist()
+        body.angle = pose[2]
+        return body
+
+    def _get_info(self):
+        n_steps = self.sim_hz // self.control_hz
+        n_contact_points_per_step = int(np.ceil(self.n_contact_points / n_steps))
+        info = {
+            'pos_agent': np.array(self.agent.position),
+            'vel_agent': np.array(self.agent.velocity),
+            'block_pose': np.array(list(self.block.position) + [self.block.angle]),
+            'goal_pose': self.goal_pose,
+            'n_contacts': n_contact_points_per_step}
+        return info
+
+    def _render_frame(self, mode):
+
+        if self.window is None and mode == "human":
+            pygame.init()
+            pygame.display.init()
+            self.window = pygame.display.set_mode((self.window_size, self.window_size))
+        if self.clock is None and mode == "human":
+            self.clock = pygame.time.Clock()
+
+        canvas = pygame.Surface((self.window_size, self.window_size))
+        canvas.fill((255, 255, 255))
+        self.screen = canvas
+
+        draw_options = DrawOptions(canvas)
+
+        # Draw goal pose.
+        goal_body = self._get_goal_pose_body(self.goal_pose)
         for shape in self.block.shapes:
-            goal_points = [goal_body.local_to_world(v) for v in shape.get_vertices()]
-            goal_points = [pymunk.pygame_util.to_pygame(point, draw_options.surface) for point in goal_points]
+            goal_points = [pymunk.pygame_util.to_pygame(goal_body.local_to_world(v), draw_options.surface) for v in
+                           shape.get_vertices()]
             goal_points += [goal_points[0]]
-            pygame.draw.polygon(screen, pygame.Color("LightGreen"), goal_points)
+            pygame.draw.polygon(canvas, self.goal_color, goal_points)
 
-        # Draw agent and block
+        # Draw agent and block.
         self.space.debug_draw(draw_options)
-        return screen
 
-    def _get_img(self, screen, width, height, render_action=False):
-        img = np.transpose(np.array(pygame.surfarray.pixels3d(screen)), axes=(1, 0, 2))
-        img = cv2.resize(img, (width, height))
-        render_size = min(width, height)
-        if render_action and self._last_action is not None:
-            action = np.array(self._last_action)
-            coord = (action / 512 * [height, width]).astype(np.int32)
-            marker_size = int(8 / 96 * render_size)
-            thickness = int(1 / 96 * render_size)
-            cv2.drawMarker(
-                img,
-                coord,
-                color=(255, 0, 0),
-                markerType=cv2.MARKER_CROSS,
-                markerSize=marker_size,
-                thickness=thickness,
-            )
-        return img
-
-    def render(self):
-        return self._render(visualize=True)
-
-    def _render(self, visualize=False):
-        width, height = (
-            (self.visualization_width, self.visualization_height)
-            if visualize
-            else (self.observation_width, self.observation_height)
-        )
-        screen = self._draw()  # draw the environment on a screen
-
-        if self.render_mode == "rgb_array":
-            return self._get_img(screen, width=width, height=height, render_action=visualize)
-        elif self.render_mode == "human":
-            if self.window is None:
-                pygame.init()
-                pygame.display.init()
-                self.window = pygame.display.set_mode((512, 512))
-            if self.clock is None:
-                self.clock = pygame.time.Clock()
-
-            self.window.blit(
-                screen, screen.get_rect()
-            )  # copy our drawings from `screen` to the visible window
+        if mode == "human":
+            # The following line copies our drawings from `canvas` to the visible window
+            self.window.blit(canvas, canvas.get_rect())
             pygame.event.pump()
-            self.clock.tick(self.metadata["render_fps"] * int(1 / (self.dt * self.control_hz)))
             pygame.display.update()
-            return self._get_img(screen, width=width, height=height, render_action=False)
-        else:
-            raise ValueError(self.render_mode)
+
+            # the clock is aleady ticked during in step for "human"
+
+        img = np.transpose(
+            np.array(pygame.surfarray.pixels3d(canvas)), axes=(1, 0, 2)
+        )
+
+        img_obs = cv2.resize(img, (self.render_size, self.render_size))
+        if self.render_action:
+            if self.render_action and (self.latest_action is not None):
+                action = np.array(self.latest_action)
+                coord = (action / 512 * 96).astype(np.int32)
+                marker_size = int(8 / 96 * self.render_size)
+                thickness = int(1 / 96 * self.render_size)
+                cv2.drawMarker(img_obs, coord,
+                               color=(255, 0, 0), markerType=cv2.MARKER_CROSS,
+                               markerSize=marker_size, thickness=thickness)
+
+        if self.render_action:
+            if self.render_action and (self.latest_action is not None):
+                action = np.array(self.latest_action)
+                coord = (action).astype(np.int32)
+                marker_size = int(8 / 96 * self.render_size * 5)
+                thickness = int(1 / 96 * self.render_size * 5)
+                cv2.drawMarker(img, coord,
+                               color=(255, 0, 0), markerType=cv2.MARKER_CROSS,
+                               markerSize=marker_size, thickness=thickness)
+        return img_obs, img
 
     def close(self):
         if self.window is not None:
             pygame.display.quit()
             pygame.quit()
 
-    def teleop_agent(self):
-        teleop_agent = collections.namedtuple("TeleopAgent", ["act"])
-
-        def act(obs):
-            act = None
-            mouse_position = pymunk.pygame_util.from_pygame(Vec2d(*pygame.mouse.get_pos()), self.window)
-            if self.teleop or (mouse_position - self.agent.position).length < 30:
-                self.teleop = True
-                act = mouse_position
-            return act
-
-        return teleop_agent(act)
-
-    def get_obs(self):
-        if self.obs_type == "state":
-            agent_position = np.array(self.agent.position)
-            block_position = np.array(self.block.position)
-            block_angle = self.block.angle % (2 * np.pi)
-            return np.concatenate([agent_position, block_position, [block_angle]], dtype=np.float64)
-
-        if self.obs_type == "environment_state_agent_pos":
-            return {
-                "environment_state": self.get_keypoints(self._block_shapes).flatten(),
-                "agent_pos": np.array(self.agent.position),
-            }
-
-        pixels = self._render()
-        if self.obs_type == "pixels":
-            return pixels
-        elif self.obs_type == "pixels_agent_pos":
-            return {
-                "pixels": pixels,
-                "agent_pos": np.array(self.agent.position),
-            }
-
-    @staticmethod
-    def get_goal_pose_body(pose):
-        mass = 1
-        inertia = pymunk.moment_for_box(mass, (50, 100))
-        body = pymunk.Body(mass, inertia)
-        # preserving the legacy assignment order for compatibility
-        # the order here doesn't matter somehow, maybe because CoM is aligned with body origin
-        body.position = pose[:2].tolist()
-        body.angle = pose[2]
-        return body
-
-    def _get_info(self):
-        n_steps = int(1 / self.dt * self.control_hz)
-        n_contact_points_per_step = int(np.ceil(self.n_contact_points / n_steps))
-        info = {
-            "pos_agent": np.array(self.agent.position),
-            "vel_agent": np.array(self.agent.velocity),
-            "block_pose": np.array(list(self.block.position) + [self.block.angle]),
-            "goal_pose": self.goal_pose,
-            "n_contacts": n_contact_points_per_step,
-        }
-        return info
+    def seed(self, seed=None):
+        if seed is None:
+            seed = np.random.randint(0, 25536)
+        self._seed = seed
+        self.np_random = np.random.default_rng(seed)
 
     def _handle_collision(self, arbiter, space, data):
         self.n_contact_points += len(arbiter.contact_point_set.points)
 
-    def generate_goal_pose(self):
-        if self.goal_mode == "random":
-            return np.array([
-                            self.np_random.uniform(100, 400),      # x
-                            self.np_random.uniform(100, 400),      # y
-                            self.np_random.uniform(-np.pi, np.pi)           # theta
-            ])
+    def _set_state(self, state):
+        if isinstance(state, np.ndarray):
+            state = state.tolist()
+        pos_agent = state[:2]
+        pos_block = state[2:4]
+        rot_block = state[4]
+        self.agent.position = pos_agent
+        # setting angle rotates with respect to center of mass
+        # therefore will modify the geometric position
+        # if not the same as CoM
+        # therefore should be modified first.
+        if self.legacy:
+            # for compatiblity with legacy data
+            self.block.position = pos_block
+            self.block.angle = rot_block
         else:
-            return np.array([256, 256, np.pi / 4])  # x, y, theta (in radians)
+            self.block.angle = rot_block
+            self.block.position = pos_block
 
-    def get_goal_pose(self):
-        return self.goal_pose
+        # Run physics to take effect
+        self.space.step(1.0 / self.sim_hz)
+
+    def _set_state_local(self, state_local):
+        agent_pos_local = state_local[:2]
+        block_pose_local = state_local[2:]
+        tf_img_obj = st.AffineTransform(
+            translation=self.goal_pose[:2],
+            rotation=self.goal_pose[2])
+        tf_obj_new = st.AffineTransform(
+            translation=block_pose_local[:2],
+            rotation=block_pose_local[2]
+        )
+        tf_img_new = st.AffineTransform(
+            matrix=tf_img_obj.params @ tf_obj_new.params
+        )
+        agent_pos_new = tf_img_new(agent_pos_local)
+        new_state = np.array(
+            list(agent_pos_new[0]) + list(tf_img_new.translation) \
+            + [tf_img_new.rotation])
+        self._set_state(new_state)
+        return new_state
 
     def _setup(self):
         self.space = pymunk.Space()
         self.space.gravity = 0, 0
-        self.space.damping = self.damping if self.damping is not None else 0.0
+        self.space.damping = 0
         self.teleop = False
+        self.render_buffer = list()
 
-        # Add walls
+        # Add walls.
         walls = [
-            self.add_segment(self.space, (5, 506), (5, 5), 2),
-            self.add_segment(self.space, (5, 5), (506, 5), 2),
-            self.add_segment(self.space, (506, 5), (506, 506), 2),
-            self.add_segment(self.space, (5, 506), (506, 506), 2),
+            self._add_segment((5, 506), (5, 5), 2),
+            self._add_segment((5, 5), (506, 5), 2),
+            self._add_segment((506, 5), (506, 506), 2),
+            self._add_segment((5, 506), (506, 506), 2)
         ]
         self.space.add(*walls)
 
-        # Add agent, block, and goal zone
-        self.agent = self.add_circle(self.space, (256, 400), 15)
-        self.block, self._block_shapes = self.add_tee(self.space, (256, 300), 0)
-        self.goal_pose = self.generate_goal_pose()
-        if self.block_cog is not None:
-            self.block.center_of_gravity = self.block_cog
+        # Add agent, block, and goal zone.
+        self.agent = self.add_circle((256, 400), 15)
+        self.block = self.add_tee((256, 300), 0)
+        self.goal_color = pygame.Color('LightGreen')
+        self.goal_pose = np.array([256, 256, np.pi / 4])  # x, y, theta (in radians)
 
-        # Add collision handling
+        # Add collision handeling
         self.collision_handeler = self.space.add_collision_handler(0, 0)
         self.collision_handeler.post_solve = self._handle_collision
         self.n_contact_points = 0
 
-    def _set_state(self, state):
-        self.agent.position = list(state[:2])
-        # Setting angle rotates with respect to center of mass, therefore will modify the geometric position if not
-        # the same as CoM. Therefore should theoretically set the angle first. But for compatibility with legacy data,
-        # we do the opposite.
-        self.block.position = list(state[2:4])
-        self.block.angle = state[4]
+        self.max_score = 50 * 100
+        self.success_threshold = 0.95  # 95% coverage.
 
-        # Run physics to take effect
-        self.space.step(self.dt)
-
-    @staticmethod
-    def add_segment(space, a, b, radius):
-        shape = pymunk.Segment(space.static_body, a, b, radius)
-        shape.color = pygame.Color("LightGray")  # https://htmlcolorcodes.com/color-names
+    def _add_segment(self, a, b, radius):
+        shape = pymunk.Segment(self.space.static_body, a, b, radius)
+        shape.color = pygame.Color('LightGray')  # https://htmlcolorcodes.com/color-names
         return shape
 
-    @staticmethod
-    def add_circle(space, position, radius):
+    def add_circle(self, position, radius):
         body = pymunk.Body(body_type=pymunk.Body.KINEMATIC)
         body.position = position
         body.friction = 1
         shape = pymunk.Circle(body, radius)
-        shape.color = pygame.Color("RoyalBlue")
-        space.add(body, shape)
+        shape.color = pygame.Color('RoyalBlue')
+        self.space.add(body, shape)
         return body
 
-    @staticmethod
-    def add_tee(space, position, angle, scale=30, color="LightSlateGray", mask=None):
-        if mask is None:
-            mask = pymunk.ShapeFilter.ALL_MASKS()
+    def add_box(self, position, height, width):
+        mass = 1
+        inertia = pymunk.moment_for_box(mass, (height, width))
+        body = pymunk.Body(mass, inertia)
+        body.position = position
+        shape = pymunk.Poly.create_box(body, (height, width))
+        shape.color = pygame.Color('LightSlateGray')
+        self.space.add(body, shape)
+        return body
+
+    def add_tee(self, position, angle, scale=30, color='LightSlateGray', mask=pymunk.ShapeFilter.ALL_MASKS()):
         mass = 1
         length = 4
-        vertices1 = [
-            (-length * scale / 2, scale),
-            (length * scale / 2, scale),
-            (length * scale / 2, 0),
-            (-length * scale / 2, 0),
-        ]
+        vertices1 = [(-length * scale / 2, scale),
+                     (length * scale / 2, scale),
+                     (length * scale / 2, 0),
+                     (-length * scale / 2, 0)]
         inertia1 = pymunk.moment_for_poly(mass, vertices=vertices1)
-        vertices2 = [
-            (-scale / 2, scale),
-            (-scale / 2, length * scale),
-            (scale / 2, length * scale),
-            (scale / 2, scale),
-        ]
+        vertices2 = [(-scale / 2, scale),
+                     (-scale / 2, length * scale),
+                     (scale / 2, length * scale),
+                     (scale / 2, scale)]
         inertia2 = pymunk.moment_for_poly(mass, vertices=vertices1)
         body = pymunk.Body(mass, inertia1 + inertia2)
         shape1 = pymunk.Poly(body, vertices1)
@@ -527,31 +541,89 @@ class PushTEnv(gym.Env):
         shape1.filter = pymunk.ShapeFilter(mask=mask)
         shape2.filter = pymunk.ShapeFilter(mask=mask)
         body.center_of_gravity = (shape1.center_of_gravity + shape2.center_of_gravity) / 2
-        body.angle = angle
         body.position = position
+        body.angle = angle
         body.friction = 1
-        space.add(body, shape1, shape2)
-        return body, [shape1, shape2]
+        self.space.add(body, shape1, shape2)
+        return body
 
-    @staticmethod
-    def get_keypoints(block_shapes):
-        """Get a (8, 2) numpy array with the T keypoints.
 
-        The T is composed of two rectangles each with 4 keypoints.
+class PushTImageEnv(PushTEnv):
+    metadata = {"render.modes": ["rgb_array"], "video.frames_per_second": 10}
 
-        0───────────1
-        │           │
-        3───4───5───2
-            │   │
-            │   │
-            │   │
-            │   │
-            7───6
-        """
-        keypoints = []
-        for shape in block_shapes:
-            for v in shape.get_vertices():
-                v = v.rotated(shape.body.angle)
-                v = v + shape.body.position
-                keypoints.append(np.array(v))
-        return np.row_stack(keypoints)
+    def __init__(self,
+                 legacy=False,
+                 block_cog=None,
+                 damping=None,
+                 render_size=96, render_size_vis=512):
+        super().__init__(
+            legacy=legacy,
+            block_cog=block_cog,
+            damping=damping,
+            render_size=render_size,
+            render_action=False)
+        self.render_size_vis = render_size_vis
+        ws = self.window_size
+        self.observation_space = spaces.Dict({
+            'image': spaces.Box(
+                low=0,
+                high=1,
+                shape=(3, render_size, render_size),
+                dtype=np.float32
+            ),
+            'agent_pos': spaces.Box(
+                low=0,
+                high=ws,
+                shape=(2,),
+                dtype=np.float32
+            )
+        })
+        self.render_cache = None
+
+    def _get_obs(self):
+        img_obs, img_vis = super()._render_frame(mode='rgb_array')
+
+        agent_pos = np.array(self.agent.position)
+        img_obs = np.moveaxis(img_obs.astype(np.float32) / 255, -1, 0)
+        obs = {
+            'image': img_obs,
+            'agent_pos': agent_pos
+        }
+
+        # draw action
+        if self.latest_action is not None:
+            action = np.array(self.latest_action)
+            coord = (action).astype(np.int32)
+            marker_size = int(8 / 36 * self.render_size)
+            thickness = int(1 / 36 * self.render_size)
+            cv2.drawMarker(img_vis, coord,
+                           color=(255, 0, 0), markerType=cv2.MARKER_CROSS,
+                           markerSize=marker_size, thickness=thickness)
+
+        self.render_cache = img_vis
+
+        return obs
+
+    def render(self, mode):
+        assert mode == 'rgb_array'
+
+        if self.render_cache is None:
+            self._get_obs()
+
+        return self.render_cache
+
+    def render_actions(self, actions: np.ndarray) -> np.ndarray:
+        img = self.render_cache.copy()
+
+        n = len(actions)
+        cmap = np.stack([
+            np.linspace(0, 255, n),
+            np.zeros(n, dtype=np.float32),
+            np.linspace(255, 0, n)
+        ], axis=1).astype(np.uint8)
+
+        for k, (pt, col) in enumerate(zip(actions * 512, cmap)):
+            x, y = pt.astype(int)
+            cv2.circle(img, (x , y), 5, tuple(int(c) for c in col), thickness=-1)
+
+        return img
