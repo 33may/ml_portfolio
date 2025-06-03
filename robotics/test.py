@@ -1,8 +1,3 @@
-import numpy as np
+import robosuite_models
 
-points = [[4, 6], [11, 6], [0,5], [1,2]]
-
-v_p = np.ndarray(points)
-
-print(v_p)
-
+print(robosuite_models.__file__)

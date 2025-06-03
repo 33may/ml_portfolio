@@ -317,20 +317,16 @@ class CosineDDPMScheduler:
         Reverse-step pθ(x_{t-1}|x_t) для косинусного DDPM.
         t: (B,) long      x_t: (B, C, H, W)
         """
-        # --- табличные значения для текущего k -------------------------------
         beta_t = self.betas[t].view(-1, 1, 1, 1)  # β_t
         sqrt_ab_t = self.sqrt_alpha_bar[t].view(-1, 1, 1, 1)  # √ᾱ_t
         sqrt_omab_t = self.sqrt_one_minus_alpha_bar[t].view(-1, 1, 1, 1)
 
-        # --- √ᾱ_{t-1} --------------------------------------------------------
         # t  shape (B,)  — все t ≥ 1
         sqrt_ab_prev = self.sqrt_alpha_bar[t - 1].view(-1, 1, 1, 1)  # (B,1,1,1)
         alpha_bar_prev = sqrt_ab_prev ** 2
 
-        # --- предсказание x₀ из ε̂ -------------------------------------------
         x0_pred = (x_t - sqrt_omab_t * eps_pred) / sqrt_ab_t  # Eq.(15)
 
-        # --- коэффициенты μ_θ(x_t) ------------------------------------------
 
         alpha_t = 1.0 - beta_t  # α_t
 
@@ -341,7 +337,6 @@ class CosineDDPMScheduler:
         # Eq.(7)
         mean = coef1 * x0_pred + coef2 * x_t
 
-        # --- дисперсия и шум --------------------------------------------------
         var = self.posterior_var[t].view(-1, 1, 1, 1)
         noise = torch.randn_like(x_t) * (t > 0).float().view(-1, 1, 1, 1)
 
