@@ -1,157 +1,247 @@
-#!/usr/bin/env python
-"""Universal RoboTurk demo viewer (Sawyer, *pegs-full*) that survives **all**
-robosuite forks.
-
-Highlights
-==========
-* **Controller-safe** – registers `JOINT_VELOCITY` regardless of registry name.
-* **Bug-free** – patches read-only `torque_compensation` seen in forks.
-* **Schema-free** – finds arm block, no hard-coded `body_parts → arms`.
-* **Lean** – <200 logical lines, zero external helpers.
-
-```bash
-export MUJOCO_GL=glfw
-python sim_viewer.py /ABS/PATH/TO/pegs-full --fps 20
-```
-"""
-from __future__ import annotations
-
-import argparse
-import inspect
+import random
 import time
-from pathlib import Path
 
 import h5py
 import numpy as np
 import robosuite as suite
-from robosuite import load_composite_controller_config
+from robosuite.wrappers import GymWrapper
 
-# ---------------------------------------------------------------------------
-# 0. Controller shim + hot-patch for torque_compensation
-# ---------------------------------------------------------------------------
-try:
-    from robosuite.controllers.parts.generic.joint_vel import JointVelocityController  # type: ignore
-except ModuleNotFoundError as err:
-    raise ImportError("JointVelocityController missing — update robosuite.") from err
-
-# Fix read-only property
-if isinstance(getattr(JointVelocityController, "torque_compensation", None), property):
-    prop = JointVelocityController.torque_compensation  # type: ignore[attr-defined]
-    if prop.fset is None:
-        def _set_tc(self, val):  # noqa: D401
-            self.__dict__["_torque_compensation"] = bool(val)
-        JointVelocityController.torque_compensation = prop.setter(_set_tc)  # type: ignore[assignment]
-
-# Register JV controller in whichever registry exists
-import robosuite.controllers as _rc  # noqa: E402
-for _attr in dir(_rc):
-    reg = getattr(_rc, _attr)
-    if isinstance(reg, dict) and "JOINT_POSITION" in reg:
-        reg.setdefault("JOINT_VELOCITY", JointVelocityController)
-        break
-
-# ---------------------------------------------------------------------------
-# 1. Build velocity composite controller
-# ---------------------------------------------------------------------------
-
-def _find_arm_block(cfg: dict) -> dict:
-    if isinstance(cfg.get("body_parts"), dict) and isinstance(cfg["body_parts"].get("arms"), dict):
-        return cfg["body_parts"]["arms"]
-    stack = [cfg]
-    while stack:
-        node = stack.pop()
-        if isinstance(node, dict) and any(k in node for k in ("right", "left", "right_arm", "left_arm")):
-            return node
-        if isinstance(node, dict):
-            stack.extend(v for v in node.values() if isinstance(v, dict))
-    raise KeyError("No arm controller block found in BASIC config")
+from robosuite.utils.input_utils import choose_controller
 
 
-def build_vel_controller() -> dict:
-    cfg = load_composite_controller_config(controller="BASIC")
-    arms = _find_arm_block(cfg)
-    for acfg in arms.values():
-        if isinstance(acfg, dict):
-            acfg.update(type="JOINT_VELOCITY",
-                        input_max=4, input_min=-4,
-                        output_max=4, output_min=-4)
-    return cfg
+# ─── зависимости ──────────────────────────────────────────
+import os, json, hashlib, collections, h5py, numpy as np
+import torch
+from torch.utils.data import Dataset
+from tqdm.auto import tqdm                    # ✓ прогресс-бар
+import robosuite as rs
+from robosuite.environments.base import MujocoEnv
+# ───────────────────────────────────────────────────────────
 
-# ---------------------------------------------------------------------------
-# 2. Env factory (keyword-safe across versions)
-# ---------------------------------------------------------------------------
+def xml_md5(path: str) -> str:
+    with open(path, "rb") as f:
+        return hashlib.md5(f.read()).hexdigest()
 
-def make_env(task: str, ctrl_cfg: dict, xml_path: str | None, fps: int):
-    kwargs = dict(env_name=task,
-                  robots="Sawyer",
-                  controller_configs=ctrl_cfg,
-                  has_renderer=True,
-                  has_offscreen_renderer=False,
-                  control_freq=fps,
-                  use_camera_obs=False,
-                  ignore_done=True)
-    if xml_path and "mujoco_model_path" in inspect.signature(suite.make).parameters:
-        kwargs["mujoco_model_path"] = xml_path
-    env = suite.make(**kwargs)
-    env.reset(); env.viewer.set_camera(camera_id=0)
-    return env
+# ==========================================================
+#                     ENV-КЭШ
+# ==========================================================
+class EnvCache:
+    def __init__(self, task_name: str, models_dir: str | None,
+                 cam_name="agentview", img_size=128,
+                 default=True, max_envs=None, render=False):
 
-# ---------------------------------------------------------------------------
-# 3. Helper
-# ---------------------------------------------------------------------------
+        self.task   = task_name
+        self.models = models_dir
+        self.cam    = cam_name
+        self.size   = img_size
+        self.render = render
+        self.deflt  = default
+        self.maxN   = max_envs or 32
 
-def grip_bin_to_pm1(val: float) -> float:
-    return 2.0 * val - 1.0
+        self._one : MujocoEnv | None = None
+        self._lru : "collections.OrderedDict[str, MujocoEnv]" = collections.OrderedDict()
+        self._has_xml = "mujoco_model_path" in rs.environments.base.make.__code__.co_varnames
 
-# ---------------------------------------------------------------------------
-# 4. Replay
-# ---------------------------------------------------------------------------
+    def _new_env(self, xml: str | None = None) -> MujocoEnv:
+        kw = dict(
+            env_name               = self.task,
+            robots                 = "Sawyer",
+            has_renderer           = self.render,
+            has_offscreen_renderer = True,      # ← ВСЕГДА TRUE!
+            use_camera_obs         = True,
+            camera_names           = [self.cam],
+            camera_heights         = self.size,
+            camera_widths          = self.size,
+        )
+        if xml and self._has_xml:
+            kw["mujoco_model_path"] = xml
+        return rs.make(**kw)
 
-def replay(dataset_dir: Path, fps: int):
-    h5_path, models_dir = dataset_dir / "demo.hdf5", dataset_dir / "models"
-    if not h5_path.exists():
-        raise FileNotFoundError(h5_path)
+    def get_env(self, xml_file: str | None = None) -> MujocoEnv:
+        if self.deflt or not xml_file:
+            if self._one is None:
+                self._one = self._new_env()
+            return self._one
 
-    ctrl_cfg = build_vel_controller()
-    env, current_xml = None, None
+        path = os.path.join(self.models, xml_file)
+        key  = xml_md5(path)
+        if key in self._lru:                       # hit
+            self._lru.move_to_end(key)
+            return self._lru[key]
 
-    with h5py.File(h5_path, "r") as h5:
-        demos = h5["data"]
-        task = demos.attrs["env"].replace("Sawyer", "")
-        print(f"Loaded {len(demos)} demos – task: {task}")
+        env = self._new_env(path)                  # miss → создать
+        self._lru[key] = env; self._lru.move_to_end(key)
+        if len(self._lru) > self.maxN:             # LRU-ограничение
+            _, old = self._lru.popitem(last=False)
+            old.close()
+        return env
 
-        for name, demo in demos.items():
-            xml_file = demo.attrs.get("model_file")
-            xml_path = str(models_dir / xml_file) if xml_file else None
+# ==========================================================
+#                  DATASET + РЕНДЕР
+# ==========================================================
+class SawyerDataset(Dataset):
+    def __init__(self, data_path, horizon_left=2, horizon_right=8,
+                 image_size=128, camera_name="agentview",
+                 img_batch=4096, limit_demo=None):
 
-            # (Re)build environment if XML changes
-            if env is None or xml_file != current_xml:
-                if env:
-                    env.close()
-                env = make_env(task, ctrl_cfg, xml_path, fps)
-                current_xml = xml_file
-                env.robots[0].print_action_info()
+        self.data_path = data_path
+        self.img_size   = image_size
+        self.camera     = camera_name
+        self.device     = torch.device("cpu")
 
-            dt = 1.0 / env.control_freq
-            for dq, g in zip(demo["joint_velocities"], demo["gripper_actuations"]):
-                action = np.concatenate([dq, [grip_bin_to_pm1(float(g))]], dtype=np.float32)
+        f = h5py.File(os.path.join(data_path, "demo.hdf5"), "r")
+        grp = f["data"]
+        self.task = grp.attrs["env"].replace("Sawyer", "")
+        demos = list(grp.keys())[:limit_demo] if limit_demo else list(grp.keys())
 
-                tic = time.perf_counter()
-                env.step(action)
-                env.render()
-                lag = time.perf_counter() - tic
-                if lag < dt:
-                    time.sleep(dt - lag)
-    if env:
-        env.close()
+        # ── собираем все массивы ────────────────────────────
+        idx, states, vel, grip, xmls, ends = [], [], [], [], [], [0]
+        for d in demos:
+            g  = grp[d]
+            st = g["states"][:]
+            n  = len(st)
+            win = np.clip(np.arange(n-1)[:,None] + np.arange(-horizon_left, horizon_right+1), 0, n-1)
+            idx.append(win + ends[-1])
+            states.append(st)
+            vel.append(g["joint_velocities"][:])
+            grip.append(g["gripper_actuations"][:])
+            xmls.extend([g.attrs["model_file"]]*n)
+            ends.append(ends[-1]+n)
+
+        self.idx   = np.concatenate(idx)
+        self.state = np.concatenate(states)
+        self.vel   = np.concatenate(vel)
+        self.grip  = np.concatenate(grip)
+        self.xmls  = np.array(xmls)
+
+        # ── off-screen кэш ─────────────────────────────────
+        self.ecache = EnvCache(self.task,
+                               models_dir=os.path.join(data_path,"models"),
+                               cam_name=self.camera,
+                               img_size=image_size,
+                               default=True,        # можно False, если нужен XML
+                               render=False)
+
+        # ── memmap для RGB ────────────────────────────────
+        self.img_dir  = os.path.join(data_path, f"images_{camera_name}_{image_size}")
+        self.img_bin  = os.path.join(self.img_dir, "images.dat")
+        self.meta_js  = os.path.join(self.img_dir, "images.meta")
+        os.makedirs(self.img_dir, exist_ok=True)
+
+        if not (os.path.isfile(self.img_bin) and os.path.isfile(self.meta_js)):
+            self._render_and_store(batch=img_batch)
+
+        with open(self.meta_js) as fp:
+            meta = json.load(fp)
+        N,H,W = meta["N"], meta["H"], meta["W"]
+        self.img_mm = np.memmap(self.img_bin, mode="r", dtype=np.uint8,
+                                shape=(N,H,W,3))
+
+    # ───────────────────────────────────────────────────────
+    def _render_and_store(self, batch: int):
+        N,H,W = len(self.state), self.img_size, self.img_size
+        img_mm = np.memmap(self.img_bin, mode="w+", dtype=np.uint8,
+                           shape=(N,H,W,3))
+
+        for start in tqdm(range(0, N, batch), desc="render", unit="img"):
+            for i in range(start, min(start+batch, N)):
+                env = self.ecache.get_env(self.xmls[i])
+                env.sim.set_state_from_flattened(self.state[i])
+                env.sim.forward()
+                bgr = env.sim.render(width=W, height=H, camera_name=self.camera)
+                img_mm[i] = bgr[..., ::-1]            # BGR→RGB
+
+        img_mm.flush()
+        json.dump({"N":N,"H":H,"W":W}, open(self.meta_js,"w"))
+        print(f"RGB-кадры сохранены в {self.img_bin}")
+
+    # ── pytorch API ────────────────────────────────────────
+    def __len__(self):  return len(self.idx)
+
+    def __getitem__(self, i):
+        c = i
+        img = torch.from_numpy(self.img_mm[c]).permute(2,0,1).float()/255.
+        state  = torch.tensor(self.state[c], dtype=torch.float32)
+        action = torch.tensor(self.vel[c], dtype=torch.float32)
+        return {"pixels": img.to(self.device),
+                "state" : state.to(self.device),
+                "action": action.to(self.device)}
 
 
-# ---------------------------------------------------------------------------
-# 5. CLI
-# ---------------------------------------------------------------------------
+
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
-    ap.add_argument("dataset", type=Path, help="Folder with demo.hdf5 + models/")
-    ap.add_argument("--fps", type=int, default=20)
-    opts = ap.parse_args()
-    replay(opts.dataset.expanduser().resolve(), fps=opts.fps)
+
+    MAX_FR = 25
+
+
+    controller_name = 'JOINT_VELOCITY'
+
+    arm_controller_config = suite.load_part_controller_config(default_controller=controller_name)
+
+
+    joint_dim = 7
+    controller_settings = [joint_dim, joint_dim, -0.1]
+
+    action_dim = joint_dim
+    num_test_steps = joint_dim
+    test_value = -0.1
+
+    # Define the number of timesteps to use per controller action as well as timesteps in between actions
+    steps_per_action = 75
+    steps_per_rest = 75
+
+    # Notice how the environment is wrapped by the wrapper
+    env = GymWrapper(
+        suite.make(
+            "NutAssembly",
+            robots="Sawyer",  # use Sawyer robot
+            use_camera_obs=False,  # do not use pixel observations
+            has_offscreen_renderer=False,  # not needed since not using pixel obs
+            has_renderer=True,  # make sure we can render to the screen
+            horizon=(steps_per_action + steps_per_rest) * num_test_steps,
+            control_freq=20,  # control should happen fast enough so that simulation looks smooth
+        )
+    )
+
+    env.reset()
+    env.viewer.set_camera(camera_id=0)
+
+    data_path = "../data/robot_demonstrations/RoboTurkPilot/pegs-full"
+    ds = SawyerDataset(data_path=data_path,
+                       horizon_left=2, horizon_right=8,
+                       limit_demo=5)  # первый запуск — появится tqdm
+
+    n = 0
+    gripper_dim = 0
+    for robot in env.robots:
+        gripper_dim = robot.gripper["right"].dof
+        n += int(robot.action_dim / (action_dim + gripper_dim))
+
+    # Define neutral value
+    neutral = np.zeros(action_dim + gripper_dim)
+
+    # Keep track of done variable to know when to break loop
+    count = 0
+    # Loop through controller space
+
+    # the gripper_pos is 6th element of action
+
+    for i in range(10000):
+        start = time.time()
+
+        sample = ds[0]
+
+        action = np.array(sample["action"])
+
+        obs = env.step(action)
+        env.render()
+
+        # limit frame rate if necessary
+        elapsed = time.time() - start
+        diff = 1 / MAX_FR - elapsed
+        if diff > 0:
+            time.sleep(diff)
+
+    # Shut down this env before starting the next test
+    env.close()
+
