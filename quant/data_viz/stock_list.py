@@ -1,9 +1,17 @@
 from __future__ import annotations
+
+import time
+
+from stockdex import Ticker
+
+from datetime import date, timedelta, datetime
+
 import pandas as pd
 from pandas_datareader.stooq import StooqDailyReader
 from tqdm.auto import tqdm           # nice progress bar in notebooks and terminal
 from dataclasses import dataclass
-from typing import Union, Literal, Tuple
+from typing import Union, Literal, Tuple, Optional, Any
+
 
 # ---------------------------------------------------------------------------
 # 0.  Load static S&P-500 table (once) --------------------------------------
@@ -13,6 +21,14 @@ def load_sp500() -> pd.DataFrame:
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
     df = pd.read_html(url)[0]
     df = df.rename(columns={"Symbol": "Ticker", "Security": "Name"})
+    df = df[df["Name"] != "BRK.B"]
+
+    test = True
+
+    if test:
+        df = df[:10]
+
+
     return df[["Ticker", "Name", "GICS Sector", "GICS Sub-Industry"]]
 
 df_sp_500: pd.DataFrame = load_sp500()
@@ -27,31 +43,43 @@ def all_sub_industry()  -> list[str]: return df_sp_500["GICS Sub-Industry"].uniq
 # 1.  One-shot price loader with tqdm ---------------------------------------
 # ---------------------------------------------------------------------------
 
-def _fetch_price_and_diff(ticker: str) -> Tuple[float | None, float | None]:
+def _fetch_price_and_diff(ticker_symbol: str, retries: int = 3, backoff_factor: float = 1.0) -> None | tuple[
+    None, None] | tuple[Any, Any]:
     """
-    Return (last_close, diff_30days) for a single ticker via Stooq.
+    Fetches the latest closing price and calculates the percentage change over the past 30 days.
+    Implements a retry mechanism with exponential backoff for handling ReadTimeout errors.
 
-    diff_30days is (last_close - close_30days_ago) / last_close
+    :param ticker_symbol: Stock ticker symbol.
+    :param retries: Number of retry attempts.
+    :param backoff_factor: Factor for exponential backoff.
+    :return: Tuple containing the latest closing price and percentage change.
     """
-    try:
-        df = StooqDailyReader(symbols=ticker,
-                              retry_count=3,
-                              pause=0.1).read()
-        if df.empty or len(df) < 31:             # insure we have ≥31 rows
-            return None, None
+    for attempt in range(1, retries + 1):
+        try:
+            ticker = Ticker(ticker=ticker_symbol)
+            price_df = ticker.yahoo_api_price(range='1mo', dataGranularity='1d')
+            if price_df.empty or len(price_df) < 2:
+                return None, None
+            price_df['timestamp'] = pd.to_datetime(price_df['timestamp'])
+            price_df = price_df.sort_values('timestamp')
+            first_close = price_df.iloc[0]['close']
+            last_close = price_df.iloc[-1]['close']
+            diff = (last_close - first_close) / last_close
+            return last_close, diff
+        except Exception as e:
+            print(f"Attempt {attempt} failed for {ticker_symbol}: {e}")
+            if attempt == retries:
+                return None, None
+            sleep_time = backoff_factor * (2 ** (attempt - 1))
+            print(f"Retrying in {sleep_time} seconds...")
+            time.sleep(sleep_time)
 
-        last_close      = float(df["Close"].iloc[-1])
-        prev_30_close   = float(df["Close"].iloc[-30])
-        diff            = (last_close - prev_30_close) / last_close
-        return last_close, diff
-    except Exception:
-        return None, None
 
 def preload_prices(df_base: pd.DataFrame) -> pd.DataFrame:
     """
     Add Price and Dif columns to df_base in-place.  A tqdm bar is shown.
     """
-    df_base[["Price", "Dif"]] = None        # pre-create blank cols
+    df_base[["Price", "Dif"]] = None
 
     for idx, ticker in tqdm(enumerate(df_base["Ticker"]),
                             total=len(df_base),
@@ -74,7 +102,7 @@ df_sp_500 = preload_prices(df_sp_500)
 class Query:
     name         : Union[str, None]                 # substring in Name
     page         : int                              # 1-based page
-    sort         : Literal["price_top", "price_bottom"]
+    sort         : Union[Literal["price_top", "price_bottom"], None]
     sector       : Union[str, None]                 # exact GICS Sector match or None
     sub_industry : Union[str, None]                 # exact Sub-Industry match or None
 
