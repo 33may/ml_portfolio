@@ -3,7 +3,7 @@ COLOR_BEAR = 'rgba(239,83,80,0.9)'  # #ef5350
 
 chartMultipaneOptions = [
                 {
-                    "width": 1200,
+                    "width": 1400,
                     "height": 400,
                     "layout": {
                         "background": {
@@ -30,9 +30,11 @@ chartMultipaneOptions = [
                         "borderColor": "rgba(197, 203, 206, 0.8)",
                         "barSpacing": 15
                     },
+                    "handleScroll" : False,
+                    "handleScale" : False,
                 },
                 {
-                    "width": 1200,
+                    "width": 1400,
                     "height": 100,
                     "layout": {
                         "background": {
@@ -51,10 +53,12 @@ chartMultipaneOptions = [
                     },
                     "timeScale": {
                         "visible": False,
-                    }
+                    },
+                    "handleScroll" : False,
+                    "handleScale" : False,
                 },
                 {
-                    "width": 1200,
+                    "width": 1400,
                     "height": 200,
                     "layout": {
                         "background": {
@@ -74,6 +78,8 @@ chartMultipaneOptions = [
                             "color": "rgba(197, 203, 206, 0.2)"
                         }
                     },
+                    "handleScroll" : False,
+                    "handleScale" : False,
                 }
             ]
 

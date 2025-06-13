@@ -22,8 +22,6 @@ def _fmt_diff(diff):
     return f":{colour}[{arrow} {abs(diff)*100:,.2f}%]"
 
 def stock_list() -> None:
-    st.title("S&P 500 mini-screener")
-
     # Filters (inside main page)
     with st.expander("Filters", expanded=True):
         c1, c2 = st.columns(2)
@@ -131,6 +129,13 @@ def stock_list() -> None:
 
             # 5) export JSON series
             candles = json.loads(df.to_json(orient="records"))
+
+            line_close = json.loads(
+                df[['time', 'close']]
+                .rename(columns={'close': 'value'})
+                .to_json(orient='records')
+            )
+
             volume = json.loads(
                 df.rename(columns={"volume": "value"})
                 .to_json(orient="records")
@@ -148,22 +153,23 @@ def stock_list() -> None:
                 .to_json(orient="records")
             )
 
-            st.subheader("Multipane Chart with Pandas")
-
             renderLightweightCharts([
                 {
-                    "chart": chartMultipaneOptions[0],
-                    "series": seriesCandlestickChart(candles)
+                    "chart": chartMultipaneOptions[0],  # top pane
+                    "series": seriesLineChart(
+                        line_close,
+                        line_color=COLOR_BULL,
+                    )
                 },
                 {
-                    "chart": chartMultipaneOptions[1],
+                    "chart": chartMultipaneOptions[1],  # volume pane
                     "series": seriesVolumeChart(volume)
                 },
                 {
-                    "chart": chartMultipaneOptions[2],
+                    "chart": chartMultipaneOptions[2],  # MACD pane
                     "series": seriesMACDchart(macd_fast, macd_slow, macd_hist)
                 }
-            ], 'multipane')
+            ], key=f"{r.Ticker}_multipane")
 
         else:
             st.markdown("_Select an interval above to load data_")
@@ -174,48 +180,12 @@ def stock_list() -> None:
 
         # ---- expandable details ---------------------------------------------
         with st.expander("Details & Buy", expanded=False):
-            st.markdown("Expander")
 
             # ---------- price chart with selectable interval ------------------
 
             graph_details_section(r)
 
             st.divider()
-
-            # # ---------- BUY form (Quantity & Amount) --------------------------
-            # price = float(r.Price or 0)
-            # qty_key = f"{r.Ticker}-qty"
-            # amt_key = f"{r.Ticker}-amt"
-            #
-            # # init state once
-            # if qty_key not in st.session_state:
-            #     st.session_state[qty_key] = 1.0
-            #     st.session_state[amt_key] = price
-            #
-            # def _sync_from_qty():
-            #     st.session_state[amt_key] = st.session_state[qty_key] * price
-            #
-            # def _sync_from_amt():
-            #     st.session_state[qty_key] = (
-            #         st.session_state[amt_key] / price if price else 0
-            #     )
-            #
-            # col_q, col_a = st.columns(2, gap="medium")
-            # with col_q:
-            #     st.number_input("Quantity (shares)",
-            #                     min_value=0.0, step=0.1,
-            #                     key=qty_key, on_change=_sync_from_qty)
-            # with col_a:
-            #     st.number_input("Amount ($)",
-            #                     min_value=0.0, step=0.01, format="%.2f",
-            #                     key=amt_key, on_change=_sync_from_amt)
-            #
-            # # confirm button
-            # if st.button("Confirm purchase", key=f"buy-{r.Ticker}"):
-            #     qty = st.session_state[qty_key]
-            #     amt = st.session_state[amt_key]
-            #     st.success(f"Queued order: {qty:,.4f} × {r.Ticker}  (≈ ${amt:,.2f})")
-
 
     # --------- PAGINATION buttons -----------------------------------------
     prev_col, next_col = st.columns(2)

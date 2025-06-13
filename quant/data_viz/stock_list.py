@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import time
+import yfinance as yf
+from pandas import DataFrame
 
 from stockdex import Ticker
 
@@ -8,7 +10,7 @@ from datetime import date, timedelta, datetime
 
 import pandas as pd
 from pandas_datareader.stooq import StooqDailyReader
-from tqdm.auto import tqdm           # nice progress bar in notebooks and terminal
+from tqdm.auto import tqdm  # nice progress bar in notebooks and terminal
 from dataclasses import dataclass
 from typing import Union, Literal, Tuple, Optional, Any
 
@@ -26,18 +28,24 @@ def load_sp500() -> pd.DataFrame:
     test = True
 
     if test:
-        df = df[:10]
-
+        df = df[:100]
 
     return df[["Ticker", "Name", "GICS Sector", "GICS Sub-Industry"]]
 
+
 df_sp_500: pd.DataFrame = load_sp500()
+
 
 # Convenience helpers -------------------------------------------------------
 
-def all_tickers()       -> list[str]: return df_sp_500["Ticker"].tolist()
-def all_sectors()       -> list[str]: return df_sp_500["GICS Sector"].unique().tolist()
-def all_sub_industry()  -> list[str]: return df_sp_500["GICS Sub-Industry"].unique().tolist()
+def all_tickers() -> list[str]: return df_sp_500["Ticker"].tolist()
+
+
+def all_sectors() -> list[str]: return df_sp_500["GICS Sector"].unique().tolist()
+
+
+def all_sub_industry() -> list[str]: return df_sp_500["GICS Sub-Industry"].unique().tolist()
+
 
 # ---------------------------------------------------------------------------
 # 1.  One-shot price loader with tqdm ---------------------------------------
@@ -86,13 +94,15 @@ def preload_prices(df_base: pd.DataFrame) -> pd.DataFrame:
                             desc="Fetching Stooq prices"):
         price, diff = _fetch_price_and_diff(ticker)
         df_base.at[idx, "Price"] = price
-        df_base.at[idx, "Dif"]   = diff
+        df_base.at[idx, "Dif"] = diff
 
     return df_base
+
 
 # Do the heavy work once at module import time ------------------------------
 # (takes ~15-20 s over a typical connection).
 df_sp_500 = preload_prices(df_sp_500)
+
 
 # ---------------------------------------------------------------------------
 # 2.  Query object and paginated accessor -----------------------------------
@@ -100,11 +110,12 @@ df_sp_500 = preload_prices(df_sp_500)
 
 @dataclass
 class Query:
-    name         : Union[str, None]                 # substring in Name
-    page         : int                              # 1-based page
-    sort         : Union[Literal["price_top", "price_bottom"], None]
-    sector       : Union[str, None]                 # exact GICS Sector match or None
-    sub_industry : Union[str, None]                 # exact Sub-Industry match or None
+    name: Union[str, None]  # substring in Name
+    page: int  # 1-based page
+    sort: Union[Literal["price_top", "price_bottom"], None]
+    sector: Union[str, None]  # exact GICS Sector match or None
+    sub_industry: Union[str, None]  # exact Sub-Industry match or None
+
 
 def get_stocks_paginated(query: Query,
                          page_size: int = 10) -> pd.DataFrame:
@@ -137,5 +148,32 @@ def get_stocks_paginated(query: Query,
 
     # --- pagination --------------------------------------------------------
     start = (query.page - 1) * page_size
-    end   = start + page_size
+    end = start + page_size
     return df_filtered.iloc[start:end].reset_index(drop=True)
+
+
+def load_portfolio_data(df: DataFrame):
+    tickers = df["Ticker"].tolist()
+
+    # Pull daily closes from Yahoo
+    start = df["BuyDate"].min() - timedelta(days=3)  # pad in case BuyDate is weekend
+    end = date.today()
+
+    raw = yf.download(
+        tickers=" ".join(sorted(tickers)),
+        start=start.strftime("%Y-%m-%d"),
+        end=end.strftime("%Y-%m-%d"),
+        interval="1d",
+        group_by="column",
+        progress=False
+    )["Close"]
+
+    prices = (raw
+              .resample("B")
+              .last()
+              .ffill())
+
+
+    values = pd.DataFrame(index=prices.index)
+
+    return values, prices
