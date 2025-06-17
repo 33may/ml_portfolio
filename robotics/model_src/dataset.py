@@ -1,8 +1,12 @@
+import time
+
+import h5py
 import zarr
 import random
 from tqdm import tqdm
 from torch.utils.data import Dataset
 import numpy as np
+
 
 # ==== Relevant Code ====
 
@@ -107,6 +111,109 @@ class PushTDataset(Dataset):
         }
 
 
+class RobosuiteImageActionDataset(Dataset):
+    """
+    PyTorch dataset that returns:
+        img_obs  – images for the observation horizon (oh,H,W,C)
+        act_obs  – actions for the observation horizon (oh, 2)
+        act_pred – actions for the prediction horizon (ph, 2)
+    All indices are pre‑computed once in create_trajectory_indices().
+    """
+    def __init__(self, data_path, camera_type = "agentview", obs_horizon = 2, prediction_horizon = 8, image_size = 124):
+        self.obs_horizon = obs_horizon
+        self.prediction_horizon = prediction_horizon
+        self.camera_type = camera_type + "_image" if camera_type else camera_type
+
+        f = h5py.File(data_path, "r")
+
+        data = f["data"]
+
+        episode_ends = [0]
+        actions = []
+        episode_lens = []
+        states = []
+
+        first_flag = True
+        for demo_name in tqdm(data.keys()):
+            demo_data = data[demo_name]
+
+            demo_actions = demo_data["actions"][:]
+            demo_states = demo_data["states"][:]
+
+            episode_len, _ = demo_actions.shape
+
+            episode_lens.append(episode_len)
+
+            episode_end = episode_ends[-1] + episode_len
+
+            if first_flag:
+                episode_end -= 1
+                first_flag = False
+
+
+            actions.append(demo_actions)
+            states.append(demo_states)
+            episode_ends.append(episode_end)
+
+        actions_np = np.concatenate(actions, axis=0)
+
+        if camera_type:
+            time_start = time.time()
+            images_np = np.ndarray((episode_ends[-1] + 1, image_size, image_size, 3), dtype=np.uint8)
+
+            offset = 0
+            first = True
+
+            for demo_name, ep_len in zip(data.keys(), episode_lens):
+                demo_data = data[demo_name]
+
+                # n = ep_len - (1 if first else 0)
+
+                n = ep_len
+
+                buf = images_np[offset:offset + n]
+                demo_data["obs"][self.camera_type].read_direct(buf)
+
+                offset += n
+
+            images_np = np.moveaxis(images_np, -1, 1)
+
+            self.obs_data_transformed = normalize_data(images_np, 255)
+        else:
+            states_np = np.concatenate(states, axis=0)
+            self.obs_data_transformed = states_np.astype(np.float32)
+
+        self.obs_shape = self.obs_data_transformed[0].shape
+
+        self.episode_ends = np.array(episode_ends)
+
+        self.actions_data_transformed = actions_np.astype(np.float32)
+
+
+
+        # --- windows --------------------------------------------------------
+        self.indexes = create_trajectory_indices(self.episode_ends, obs_horizon, prediction_horizon)
+
+    # total number of windows
+    def __len__(self):
+        return len(self.indexes)
+
+    # slice arrays by pre‑computed row of indices
+    def __getitem__(self, idx):
+        trajectory_idx = self.indexes[idx]
+
+        img_obs  = self.obs_data_transformed[trajectory_idx[:self.obs_horizon + 1]]
+        act_obs  = self.actions_data_transformed[trajectory_idx[:self.obs_horizon + 1]]
+        act_pred = self.actions_data_transformed[trajectory_idx[self.obs_horizon + 1:]]
+
+        return {
+            "img_obs" : img_obs,
+            "act_obs" : act_obs,
+            "act_pred" : act_pred,
+        }
+
+
+
 
 # ==== Utility and old Code ====
 
@@ -135,53 +242,3 @@ def generate_sample_dataset(n):
 
     return images, actions, episode_ends
 
-# def create_trajectory_indices(episode_ends, horizon_left, horizon_right):
-#     """
-#     The method to precompute all possible windows that will be used in training process. When the left/right horizon is outside the one episode, it is padded with the most left/right index.
-#
-#     Args:
-#         episode_ends_array:
-#         horizon_left:
-#         horizon_right:
-#
-#     Returns:
-#
-#     """
-#     def add_to_window(input_array, prediction_array, item, cur_item, input_limit):
-#         if cur_item <= input_limit:
-#             input_array.append(item)
-#         else:
-#             prediction_array.append(item)
-#
-#
-#     windows = []
-#     start_idx = 0
-#     input_lim_idx = horizon_left + 1
-#     for i in tqdm(range(len(episode_ends) - 1), total=len(episode_ends) - 1):
-#         end_idx = episode_ends[i + 1]
-#         if i > 0:
-#             start_idx = episode_ends[i] + 1
-#
-#         # print("seq: ", start_idx, end_idx)
-#
-#         for cur_idx in range(start_idx, end_idx):
-#             input = []
-#             prediction = []
-#             counter = 0
-#             for displace in range(-horizon_left, horizon_right - horizon_left + 2):
-#                 if cur_idx + displace < start_idx:
-#                     # input.append(start_idx)
-#                     idx_at_position = start_idx
-#                 elif cur_idx + displace > end_idx:
-#                     # prediction.append(end_idx)
-#                     idx_at_position = end_idx
-#                 else:
-#                     idx_at_position = cur_idx + displace
-#                     # prediction.append(cur_idx + displace)
-#
-#                 counter += 1
-#                 add_to_window(input, prediction, idx_at_position, counter, input_lim_idx)
-#
-#             windows.append((input, prediction))
-#
-#     return windows
