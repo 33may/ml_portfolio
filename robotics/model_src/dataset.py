@@ -1,6 +1,9 @@
+import itertools
 import time
+from typing import Any, Dict
 
 import h5py
+import torch
 import zarr
 import random
 from tqdm import tqdm
@@ -119,14 +122,18 @@ class RobosuiteImageActionDataset(Dataset):
         act_pred – actions for the prediction horizon (ph, 2)
     All indices are pre‑computed once in create_trajectory_indices().
     """
-    def __init__(self, data_path, camera_type = "agentview", obs_horizon = 2, prediction_horizon = 8, image_size = 124):
+    def __init__(self, data_path, camera_type = "agentview", obs_horizon = 2, pred_horizon = 8, image_size = 224, demos = None):
         self.obs_horizon = obs_horizon
-        self.prediction_horizon = prediction_horizon
+        self.prediction_horizon = pred_horizon
         self.camera_type = camera_type + "_image" if camera_type else camera_type
+
+        self.image_size = image_size
 
         f = h5py.File(data_path, "r")
 
-        data = f["data"]
+        self.data = f["data"]
+
+        self.demos = demos if demos else self.data.keys()
 
         episode_ends = [0]
         actions = []
@@ -134,8 +141,8 @@ class RobosuiteImageActionDataset(Dataset):
         states = []
 
         first_flag = True
-        for demo_name in tqdm(data.keys()):
-            demo_data = data[demo_name]
+        for demo_name in tqdm(self.demos):
+            demo_data = self.data[demo_name]
 
             demo_actions = demo_data["actions"][:]
             demo_states = demo_data["states"][:]
@@ -157,42 +164,56 @@ class RobosuiteImageActionDataset(Dataset):
 
         actions_np = np.concatenate(actions, axis=0)
 
+        self.episode_ends = np.array(episode_ends)
+        self.episode_lens = episode_lens
+
         if camera_type:
-            time_start = time.time()
-            images_np = np.ndarray((episode_ends[-1] + 1, image_size, image_size, 3), dtype=np.uint8)
-
-            offset = 0
-            first = True
-
-            for demo_name, ep_len in zip(data.keys(), episode_lens):
-                demo_data = data[demo_name]
-
-                # n = ep_len - (1 if first else 0)
-
-                n = ep_len
-
-                buf = images_np[offset:offset + n]
-                demo_data["obs"][self.camera_type].read_direct(buf)
-
-                offset += n
-
-            images_np = np.moveaxis(images_np, -1, 1)
-
-            self.obs_data_transformed = normalize_data(images_np, 255)
+            self.load_data()
         else:
             states_np = np.concatenate(states, axis=0)
             self.obs_data_transformed = states_np.astype(np.float32)
 
         self.obs_shape = self.obs_data_transformed[0].shape
 
-        self.episode_ends = np.array(episode_ends)
 
         self.actions_data_transformed = actions_np.astype(np.float32)
 
 
 
         # --- windows --------------------------------------------------------
-        self.indexes = create_trajectory_indices(self.episode_ends, obs_horizon, prediction_horizon)
+        self.indexes = create_trajectory_indices(self.episode_ends, obs_horizon, pred_horizon)
+
+    def drop_data(self):
+        self.obs_data_transformed = None
+
+    def load_data_fn(self):
+        images_np = np.ndarray((self.episode_ends[-1] + 1, self.image_size, self.image_size, 3), dtype=np.float32)
+
+        offset = 0
+        first = True
+
+        for demo_name, ep_len in tqdm(zip(self.demos, self.episode_lens)):
+            demo_data = self.data[demo_name]
+
+            # n = ep_len - (1 if first else 0)
+
+            n = ep_len
+
+            buf = images_np[offset:offset + n]
+            demo_data["obs"][self.camera_type].read_direct(buf)
+
+            offset += n
+
+        images_np = np.moveaxis(images_np, -1, 1)
+
+        return images_np
+
+    def load_data(self):
+        images_np = self.load_data_fn()
+
+        self.obs_data_transformed = normalize_data(images_np, 255)
+        # self.obs_data_transformed = images_np
+
 
     # total number of windows
     def __len__(self):
@@ -212,6 +233,92 @@ class RobosuiteImageActionDataset(Dataset):
             "act_pred" : act_pred,
         }
 
+
+class RobosuiteImageActionDatasetMem(Dataset):
+    """Lazy HDF5 loader with identical window semantics to the eager class."""
+
+    def __init__(self, path: str,
+                 camera: str = "agentview",
+                 obs_horizon: int = 1,
+                 pred_horizon: int = 8) -> None:
+        super().__init__()
+        self._path = path
+        self.f = h5py.File(path, "r", libver="latest")
+
+        # pick raw vs. already-normalised dataset
+        cam_norm = f"{camera}_image_normalized"
+
+        self.cam, self.already_norm = cam_norm, True
+
+        self.oh, self.ph = obs_horizon, pred_horizon
+        self.span = obs_horizon + pred_horizon + 1
+
+        # -------- episode metadata (inclusive ends) ---------------------
+        self.demos: list[Any] = list(self.f["data"].values())
+        self.episode_ends = np.fromiter(
+            itertools.accumulate(
+                [-1] + [len(d["actions"]) for d in self.demos]),  # inclusive
+            dtype=np.int64
+        )
+        # episode starts for local-index conversion
+        self.episode_starts = self.episode_ends[:-1] + 1
+
+        # global timestep → demo id map
+        self.demo_of_step = np.empty(self.episode_ends[-1] + 1, np.int32)
+        for i, (lo, hi) in enumerate(zip(self.episode_starts,
+                                         self.episode_ends[1:] + 1)):
+            self.demo_of_step[lo:hi] = i
+
+        # -------- pre-compute all valid windows -------------------------
+        self.indexes = create_trajectory_indices(
+            self.episode_ends, obs_horizon, pred_horizon)
+
+    # -------------------------------------------------------------------
+    @staticmethod
+    def _frames_to_tensor(frames: np.ndarray, already_norm: bool) -> torch.Tensor:
+        t = torch.as_tensor(frames, dtype=torch.float32)
+        if not already_norm:                                    # uint8 → [0,1]
+            t = t.div_(255.0)
+        return t.permute(0, 3, 1, 2)                            # HWC → CHW
+
+    # -------------------------------------------------------------------
+    def __len__(self) -> int:
+        return len(self.indexes)
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        row_global = self.indexes[idx]                          # (span,)
+        demo_id    = self.demo_of_step[row_global[0]]
+        d          = self.demos[demo_id]
+        row_local  = row_global - self.episode_starts[demo_id]
+
+        # ----------- fancy-index without duplicates --------------------
+        uniq, inv  = np.unique(row_local, return_inverse=True)  # strictly
+        frames_u   = d["obs"][self.cam][uniq]
+        acts_u     = d["actions"][uniq].astype(np.float32)
+
+        frames = frames_u[inv]                                  # restore dups
+        acts   = acts_u[inv]
+
+        return {
+            "img_obs":  self._frames_to_tensor(frames, self.already_norm)
+                         [: self.oh + 1],
+            "act_obs":  torch.from_numpy(acts)[: self.oh + 1],
+            "act_pred": torch.from_numpy(acts)[self.oh + 1:]
+        }
+
+    # -------------------------------------------------------------------
+    # re-open file in each DataLoader worker
+    def __getstate__(self):
+        st = self.__dict__.copy()
+        st["f"] = None
+        st["demos"] = None
+        return st
+
+    def __setstate__(self, st):
+        self.__dict__.update(st)
+        if self.f is None:                                      # worker proc
+            self.f = h5py.File(self._path, "r", libver="latest")
+            self.demos = list(self.f["data"].values())
 
 
 
