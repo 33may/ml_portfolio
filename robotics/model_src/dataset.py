@@ -1,6 +1,7 @@
 import itertools
 import time
-from typing import Any, Dict
+from pathlib import Path
+from typing import Any, Dict, OrderedDict
 
 import h5py
 import torch
@@ -33,7 +34,7 @@ def create_trajectory_indices(episode_ends: np.ndarray,
     all_windows = []
     start_idx = 0
     window_template = np.arange(-horizon_left, horizon_right + 1) # [W,]
-    for i in tqdm(range(len(episode_ends) - 1), total=len(episode_ends) - 1):
+    for i in range(len(episode_ends) - 1):
         end_idx = episode_ends[i + 1]
         if i > 0:
             start_idx = episode_ends[i] + 1 # first valid frame in ep
@@ -124,8 +125,8 @@ class RobosuiteImageActionDataset(Dataset):
     """
     def __init__(self, data_path, camera_type = "agentview", obs_horizon = 2, pred_horizon = 8, image_size = 224, demos = None):
         self.obs_horizon = obs_horizon
-        self.prediction_horizon = pred_horizon
-        self.camera_type = camera_type + "_image" if camera_type else camera_type
+        self.pred_horizon = pred_horizon
+        self.camera_type = camera_type + "_image_normalized" if camera_type else camera_type
 
         self.image_size = image_size
 
@@ -135,13 +136,15 @@ class RobosuiteImageActionDataset(Dataset):
 
         self.demos = demos if demos else self.data.keys()
 
+        self.indexes = None
+
         episode_ends = [0]
         actions = []
         episode_lens = []
         states = []
 
         first_flag = True
-        for demo_name in tqdm(self.demos):
+        for demo_name in self.demos:
             demo_data = self.data[demo_name]
 
             demo_actions = demo_data["actions"][:]
@@ -179,11 +182,8 @@ class RobosuiteImageActionDataset(Dataset):
         self.actions_data_transformed = actions_np.astype(np.float32)
 
 
-
-        # --- windows --------------------------------------------------------
-        self.indexes = create_trajectory_indices(self.episode_ends, obs_horizon, pred_horizon)
-
     def drop_data(self):
+        self.indexes = None
         self.obs_data_transformed = None
 
     def load_data_fn(self):
@@ -211,8 +211,10 @@ class RobosuiteImageActionDataset(Dataset):
     def load_data(self):
         images_np = self.load_data_fn()
 
-        self.obs_data_transformed = normalize_data(images_np, 255)
-        # self.obs_data_transformed = images_np
+        # self.obs_data_transformed = normalize_data(images_np, 255)
+        self.obs_data_transformed = images_np
+
+        self.indexes = create_trajectory_indices(self.episode_ends, self.obs_horizon, self.pred_horizon)
 
 
     # total number of windows
@@ -235,90 +237,130 @@ class RobosuiteImageActionDataset(Dataset):
 
 
 class RobosuiteImageActionDatasetMem(Dataset):
-    """Lazy HDF5 loader with identical window semantics to the eager class."""
+    """
+    Хранит hdf5-демонстрации на диске, но одновременно
+    держит в оперативной памяти не более `max_eps_in_ram` эпизодов.
+    По обращениям кэш ведёт себя как LRU: самые «холодные» выталкиваются.
+    """
 
-    def __init__(self, path: str,
-                 camera: str = "agentview",
-                 obs_horizon: int = 1,
-                 pred_horizon: int = 8) -> None:
+    # ------------------------- init ---------------------------
+    def __init__(
+        self,
+        path: str | Path,
+        camera: str = "agentview",
+        obs_horizon: int = 1,
+        pred_horizon: int = 8,
+        *,
+        max_eps_in_ram: int = 4,
+    ) -> None:
         super().__init__()
-        self._path = path
-        self.f = h5py.File(path, "r", libver="latest")
 
-        # pick raw vs. already-normalised dataset
-        cam_norm = f"{camera}_image_normalized"
+        self._path = str(path)
+        # увеличенный chunk-cache ускоряет последовательное чтение
+        self.f = h5py.File(
+            self._path,
+            "r",
+            libver="latest",
+            rdcc_nbytes=64 * 1024**2,   # 64 MiB под «горячие» chunk’и
+            rdcc_nslots=1_000_003,      # ≈1 млн хеш-слотов
+        )
 
-        self.cam, self.already_norm = cam_norm, True
+        # raw- vs normalised-кадры
+        self.cam = f"{camera}_image_normalized"
+        self.already_norm = True
 
         self.oh, self.ph = obs_horizon, pred_horizon
         self.span = obs_horizon + pred_horizon + 1
 
-        # -------- episode metadata (inclusive ends) ---------------------
-        self.demos: list[Any] = list(self.f["data"].values())
+        # -------- метаданные эпизодов ---------------------------------
+        self.demos_raw: list[Any] = list(self.f["data"].values())
+
         self.episode_ends = np.fromiter(
-            itertools.accumulate(
-                [-1] + [len(d["actions"]) for d in self.demos]),  # inclusive
-            dtype=np.int64
-        )
-        # episode starts for local-index conversion
+            itertools.accumulate([-1] +
+                                 [len(d["actions"]) for d in self.demos_raw]),
+            dtype=np.int64,
+        )  # inclusive
         self.episode_starts = self.episode_ends[:-1] + 1
 
-        # global timestep → demo id map
         self.demo_of_step = np.empty(self.episode_ends[-1] + 1, np.int32)
-        for i, (lo, hi) in enumerate(zip(self.episode_starts,
-                                         self.episode_ends[1:] + 1)):
+        for i, (lo, hi) in enumerate(
+            zip(self.episode_starts, self.episode_ends[1:] + 1)
+        ):
             self.demo_of_step[lo:hi] = i
 
-        # -------- pre-compute all valid windows -------------------------
+        # -------- все допустимые окна ---------------------------------
         self.indexes = create_trajectory_indices(
-            self.episode_ends, obs_horizon, pred_horizon)
+            self.episode_ends, obs_horizon, pred_horizon
+        )
 
-    # -------------------------------------------------------------------
+        # -------- LRU-кэш эпизодов -----------------------------------
+        self._cache: OrderedDict[int, Any] = OrderedDict()
+        self.max_eps_in_ram = max_eps_in_ram
+
+    # ------------------- helpers ------------------------------------
     @staticmethod
     def _frames_to_tensor(frames: np.ndarray, already_norm: bool) -> torch.Tensor:
         t = torch.as_tensor(frames, dtype=torch.float32)
-        if not already_norm:                                    # uint8 → [0,1]
+        if not already_norm:               # uint8 → [0,1]
             t = t.div_(255.0)
-        return t.permute(0, 3, 1, 2)                            # HWC → CHW
+        return t.permute(0, 3, 1, 2)       # B HWC → B CHW
 
-    # -------------------------------------------------------------------
+    def _get_demo(self, demo_id: int):
+        """LRU-доступ к эпизоду."""
+        d = self._cache.get(demo_id)
+        if d is None:
+            d = self.demos_raw[demo_id]
+            self._cache[demo_id] = d
+            self._cache.move_to_end(demo_id)          # mark MRU
+            if len(self._cache) > self.max_eps_in_ram:
+                self._cache.popitem(last=False)       # выгнать LRU
+        return d
+
+    # ---------------- Dataset API -----------------------------------
     def __len__(self) -> int:
         return len(self.indexes)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        row_global = self.indexes[idx]                          # (span,)
+        row_global = self.indexes[idx]                 # (span,)
         demo_id    = self.demo_of_step[row_global[0]]
-        d          = self.demos[demo_id]
+        d          = self._get_demo(demo_id)
         row_local  = row_global - self.episode_starts[demo_id]
 
-        # ----------- fancy-index without duplicates --------------------
-        uniq, inv  = np.unique(row_local, return_inverse=True)  # strictly
+        # уникальные временные шаги, чтобы не читать кадр дважды
+        uniq, inv  = np.unique(row_local, return_inverse=True)
         frames_u   = d["obs"][self.cam][uniq]
         acts_u     = d["actions"][uniq].astype(np.float32)
 
-        frames = frames_u[inv]                                  # restore dups
+        frames = frames_u[inv]                        # восстановить дубликаты
         acts   = acts_u[inv]
 
         return {
             "img_obs":  self._frames_to_tensor(frames, self.already_norm)
                          [: self.oh + 1],
             "act_obs":  torch.from_numpy(acts)[: self.oh + 1],
-            "act_pred": torch.from_numpy(acts)[self.oh + 1:]
+            "act_pred": torch.from_numpy(acts)[self.oh + 1:],
         }
 
-    # -------------------------------------------------------------------
-    # re-open file in each DataLoader worker
+    # ---------------- pickling (DataLoader workers) -----------------
     def __getstate__(self):
         st = self.__dict__.copy()
         st["f"] = None
-        st["demos"] = None
+        st["_cache"] = None
+        st["demos_raw"] = None
         return st
 
     def __setstate__(self, st):
         self.__dict__.update(st)
-        if self.f is None:                                      # worker proc
-            self.f = h5py.File(self._path, "r", libver="latest")
-            self.demos = list(self.f["data"].values())
+        if self.f is None:                              # внутри воркера
+            self.f = h5py.File(
+                self._path,
+                "r",
+                libver="latest",
+                rdcc_nbytes=64 * 1024**2,
+                rdcc_nslots=1_000_003,
+            )
+            self.demos_raw = list(self.f["data"].values())
+            self._cache = OrderedDict()
 
 
 
