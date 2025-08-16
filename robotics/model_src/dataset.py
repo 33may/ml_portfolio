@@ -1,3 +1,5 @@
+import ctypes
+import gc
 import itertools
 import time
 from pathlib import Path
@@ -123,10 +125,12 @@ class RobosuiteImageActionDataset(Dataset):
         act_pred – actions for the prediction horizon (ph, 2)
     All indices are pre‑computed once in create_trajectory_indices().
     """
-    def __init__(self, data_path, camera_type = "agentview", obs_horizon = 2, pred_horizon = 8, image_size = 224, demos = None):
+    def __init__(self, data_path, camera_type = ["agentview"], obs_horizon = 2, pred_horizon = 8, image_size = 224, demos = None):
         self.obs_horizon = obs_horizon
         self.pred_horizon = pred_horizon
-        self.camera_type = camera_type + "_image_normalized" if camera_type else camera_type
+        self.camera_type = [camera + "_image_normalized" if camera else camera for camera in camera_type]
+
+        self.n_cameras = len(camera_type)
 
         self.image_size = image_size
 
@@ -148,7 +152,7 @@ class RobosuiteImageActionDataset(Dataset):
             demo_data = self.data[demo_name]
 
             demo_actions = demo_data["actions"][:]
-            demo_states = demo_data["states"][:]
+            # demo_states = demo_data["states"][:]
 
             episode_len, _ = demo_actions.shape
 
@@ -162,7 +166,7 @@ class RobosuiteImageActionDataset(Dataset):
 
 
             actions.append(demo_actions)
-            states.append(demo_states)
+            # states.append(demo_states)
             episode_ends.append(episode_end)
 
         actions_np = np.concatenate(actions, axis=0)
@@ -181,38 +185,68 @@ class RobosuiteImageActionDataset(Dataset):
 
         self.actions_data_transformed = actions_np.astype(np.float32)
 
+        del actions_np, actions, episode_ends, episode_lens
+
 
     def drop_data(self):
-        self.indexes = None
-        self.obs_data_transformed = None
+        """
+        Free every large in-RAM array. After this call the instance keeps
+        only lightweight metadata and can be re-filled via load_data().
+        """
+        self.indexes                = None
+        self.obs_data_transformed   = None
+        self.actions_data_transformed = None   # <- drop actions, too
+        gc.collect()
+        try:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)   # Linux: return RAM to OS
+        except OSError:
+            pass
 
     def load_data_fn(self):
-        images_np = np.ndarray((self.episode_ends[-1] + 1, self.image_size, self.image_size, 3), dtype=np.float32)
+        """
+        Read each camera into a C-contiguous slice (camera first),
+        then transpose to (T, C, 3, H, W).  One allocation, zero copies.
+        """
+        T = self.episode_ends[-1] + 1
+        H = W = self.image_size
+        C = self.n_cameras
+
+        # (C, T, 3, H, W)  – camera axis is 0 ⇒ slice is contiguous
+        images_flat = np.empty((C, T, 3, H, W), dtype=np.float32)
 
         offset = 0
-        first = True
-
         for demo_name, ep_len in tqdm(zip(self.demos, self.episode_lens)):
+            obs = self.data[demo_name]["obs"]
+
+            for cam_idx, cam in enumerate(self.camera_type):
+                dest = images_flat[cam_idx, offset: offset + ep_len]  # contiguous block
+                obs[cam].read_direct(dest)  # CHW float16
+
+            offset += ep_len
+
+        imgs_c_first = images_flat.reshape(self.n_cameras, T, 3, H, W)
+        images_np = imgs_c_first.transpose(1, 0, 2, 3, 4)  # (T, C, 3, H, W)
+
+        actions = []
+
+        for demo_name in self.demos:
             demo_data = self.data[demo_name]
 
-            # n = ep_len - (1 if first else 0)
+            demo_actions = demo_data["actions"][:]
 
-            n = ep_len
+            actions.append(demo_actions)
 
-            buf = images_np[offset:offset + n]
-            demo_data["obs"][self.camera_type].read_direct(buf)
+        actions_np = np.concatenate(actions, axis=0)
 
-            offset += n
-
-        images_np = np.moveaxis(images_np, -1, 1)
-
-        return images_np
+        return images_np, actions_np
 
     def load_data(self):
-        images_np = self.load_data_fn()
+        images_np, actions_np = self.load_data_fn()
 
         # self.obs_data_transformed = normalize_data(images_np, 255)
         self.obs_data_transformed = images_np
+
+        self.actions_data_transformed = actions_np
 
         self.indexes = create_trajectory_indices(self.episode_ends, self.obs_horizon, self.pred_horizon)
 
@@ -365,6 +399,69 @@ class RobosuiteImageActionDatasetMem(Dataset):
 
 
 # ==== Utility and old Code ====
+
+def preprocess_images_in_place(
+    h5_path: str,
+    cameras: list[str] = ("agentview", "robot0_eye_in_hand"),
+    target_dtype = np.float16,
+    img_size: int = 224,
+    rewrite = False,
+):
+    """
+    Delete every existing <camera>_image_normalized dataset
+    and recreate it in `target_dtype`.
+
+    Source dataset is assumed to be <camera>_image (uint8, HWC).
+    The new dataset is stored in CHW order, values scaled to [0, 1].
+
+    Parameters
+    ----------
+    h5_path      : path to the HDF5 file to be modified in-place.
+    cameras      : camera base names (without '_image').
+    target_dtype : dtype for the new data (np.float16, np.float32, …).
+    img_size     : expected H and W of the images.
+    """
+    with h5py.File(h5_path, "r+") as f:
+
+        if not rewrite:
+            return
+
+        for demo_name in tqdm(f["data"], desc="processing demos"):
+            obs_grp = f["data"][demo_name]["obs"]
+
+            for cam in cameras:
+                raw_name  = f"{cam}_image"
+                norm_name = f"{cam}_image_normalized"
+
+                # remove old dataset if it exists
+                if norm_name in obs_grp:
+                    del obs_grp[norm_name]
+
+                raw_ds = obs_grp[raw_name]          # (T, H, W, 3) uint8
+                T, H, W, _ = raw_ds.shape
+                assert (H, W) == (img_size, img_size), "image size mismatch"
+
+                # allocate new dataset (T, 3, H, W)
+                norm_ds = obs_grp.create_dataset(
+                    norm_name,
+                    shape=(T, 3, H, W),
+                    dtype=target_dtype,
+                    compression="gzip",
+                    compression_opts=4,
+                )
+
+                # read whole demo, convert to CHW float in [0,1]
+                buf_hwc = raw_ds[:]                              # uint8
+                buf_chw = np.moveaxis(buf_hwc, -1, 1) / 255.0    # float32
+                norm_ds[:] = buf_chw.astype(target_dtype)
+
+                norm_ds.attrs["normalised"] = True
+                norm_ds.attrs["scale"]      = "x / 255"
+
+            f.flush()
+
+
+
 
 def generate_sample_dataset(n):
     actions = []
