@@ -1,0 +1,55 @@
+# --- Python basics ---
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+*.dll
+
+# --- Envs / local configs ---
+.venv/
+.env
+.env.*
+*.log
+
+# --- IDE / OS ---
+.vscode/
+.idea/
+.DS_Store
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+*.ipynb
+
+# --- ML: datasets, outputs, logs ---
+data/
+datasets/
+runs/
+logs/
+wandb/
+checkpoints/
+outputs/
+cache/
+
+# --- Binary / large ---
+*.zarr
+*.zarr.zip
+*.zarr/
+*.npz
+*.npy
+*.pt
+*.pth
+*.onnx
+*.mp4
+*.avi
+*.mov
+*.gif
+
+# --- Project-specific paths seen in your tree ---
+robotics/data/
+robotics/diffusion/
+robotics/.ipynb_checkpoints/
+robotics/model_src/__pycache__/
+robotics/model_src/math_img/
+AIA/**/data/
+MUJOCO_LOG.TXT
+pusht_cchi_v7_replay.zarr.zip
