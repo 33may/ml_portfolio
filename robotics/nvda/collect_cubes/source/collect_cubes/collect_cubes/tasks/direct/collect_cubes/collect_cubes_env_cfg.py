@@ -10,38 +10,33 @@ from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 
 from isaaclab import sim as sim_utils
 
+
 @configclass
 class CollectCubesEnvCfg(DirectRLEnvCfg):
     # env
     decimation = 2
     episode_length_s = 5.0
 
-    action_space = 7       # number of controllable joints (for Franka)
-    observation_space = 14  # e.g. joint positions + velocities
+    action_space = 9       # number of controllable joints (for Franka)
+    observation_space = 24  # e.g. joint positions + velocities
     state_space = 0        # optional global state, keep 0 if unused
+
+    action_scale = 7.5
 
     # simulation
     sim: SimulationCfg = SimulationCfg(dt=1/120, render_interval=decimation)
 
-    # ground plane
-    ground = AssetBaseCfg(
-        prim_path="/World/defaultGroundPlane",
-        spawn=sim_utils.GroundPlaneCfg(),
-        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, -1.05)),
-    )
-
-    # lights
-    dome_light = AssetBaseCfg(
-        prim_path="/World/Light", spawn=sim_utils.DomeLightCfg(intensity=3000.0, color=(0.75, 0.75, 0.75))
-    )
-
-    # # mount
-    # table = AssetBaseCfg(
-    #     prim_path="{ENV_REGEX_NS}/Table",
-    #     spawn=sim_utils.UsdFileCfg(
-    #         usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Mounts/Stand/stand_instanceable.usd", scale=(2.0, 2.0, 2.0)
-    #     ),
+    # # ground plane
+    # ground = AssetBaseCfg(
+    #     prim_path="/World/defaultGroundPlane",
+    #     spawn=sim_utils.GroundPlaneCfg(),
+    #     init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, -1.05)),
     # )
+
+    # # lights
+    # dome_light = AssetBaseCfg(
+    #     prim_path="/World/Light", spawn=sim_utils.DomeLightCfg(intensity=3000.0, color=(0.75, 0.75, 0.75))
+    # ) 
 
     # robot
     robot_cfg: ArticulationCfg = FRANKA_PANDA_CFG.replace(
@@ -49,7 +44,6 @@ class CollectCubesEnvCfg(DirectRLEnvCfg):
     )
     robot_cfg.fix_base = True
     # robot_cfg.ee_frame_name = "panda_hand_tcp"
-
 
     cube_cfg: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/Cube",
@@ -59,16 +53,50 @@ class CollectCubesEnvCfg(DirectRLEnvCfg):
             physics_material=sim_utils.RigidBodyMaterialCfg(
                 static_friction=0.7, dynamic_friction=0.5, restitution=0.0
             ),
-            rigid_props =sim_utils.RigidBodyPropertiesCfg(
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 kinematic_enabled=False,
                 disable_gravity=False,
                 solver_position_iteration_count=8,
                 solver_velocity_iteration_count=0
             ),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                contact_offset=0.005,
+                rest_offset=0.0,
+            ),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
             pos=(0.5, 0.0, 0.5),
             rot=(1.0, 0.0, 0.0, 0.0)
+        ),
+    )
+
+    # Bucket/container for collecting cubes
+    bucket_cfg: RigidObjectCfg = RigidObjectCfg(
+        prim_path="/World/envs/env_.*/Bucket",
+        spawn=sim_utils.CuboidCfg(
+            size=(0.3, 0.3, 0.15),
+            visual_material=sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(0.3, 0.8, 0.3),
+                metallic=0.0,
+                roughness=0.4,
+            ),
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                static_friction=0.8,
+                dynamic_friction=0.6,
+                restitution=0.0,
+            ),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                kinematic_enabled=True,  # ← Неподвижная корзина!
+                disable_gravity=True,     # ← Не падает
+            ),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                contact_offset=0.005,
+                rest_offset=0.0,
+            ),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=(0.6, 0.3, 0.075),  # Справа от робота, на высоте половины высоты (7.5см)
+            rot=(1.0, 0.0, 0.0, 0.0),
         ),
     )
 

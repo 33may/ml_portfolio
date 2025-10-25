@@ -155,8 +155,24 @@ class CollectCubesEnv(DirectRLEnv):
 
     def __init__(self, cfg: CollectCubesEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
-        # access robot handle
-        self.robot = None
+
+        # Time step for action scaling
+        self.dt = self.cfg.sim.dt * self.cfg.decimation
+
+        # Get joint limits from robot
+        self.robot_dof_lower_limits = self.robot.data.soft_joint_pos_limits[0, :, 0].to(device=self.device)
+        self.robot_dof_upper_limits = self.robot.data.soft_joint_pos_limits[0, :, 1].to(device=self.device)
+
+        # Speed scales for different joints (gripper slower)
+        self.robot_dof_speed_scales = torch.ones_like(self.robot_dof_lower_limits)
+        self.robot_dof_speed_scales[self.robot.find_joints("panda_finger_joint1")[0]] = 0.1
+        self.robot_dof_speed_scales[self.robot.find_joints("panda_finger_joint2")[0]] = 0.1
+
+        # Buffer for target positions
+        self.robot_dof_targets = torch.zeros((self.num_envs, self.robot.num_joints), device=self.device)
+
+        # Find body indices
+        self.hand_link_idx = self.robot.find_bodies("panda_hand")[0][0]
 
     # ------------------------------------------------------------------ #
     # Scene setup
@@ -180,24 +196,19 @@ class CollectCubesEnv(DirectRLEnv):
         # spawn cube
         self.cube = RigidObject(self.cfg.cube_cfg)
 
+        self.bucket = RigidObject(self.cfg.bucket_cfg)
+
         # 2. Spawn ground plane
 
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
 
         # 3. Clone envs
         self.scene.clone_environments(copy_from_source=False)
-
-
-        if self.device == "cpu":
-
-            print(33)
-
-            self.scene.filter_collisions(global_prim_paths=[])
-
         
         # 4. Register articulation robot
         self.scene.articulations["robot"] = self.robot
         self.scene.rigid_objects["cube"] = self.cube
+        self.scene.rigid_objects["bucket"] = self.bucket
 
         # 5. Add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=3000.0, color=(0.75, 0.75, 0.75))
@@ -206,20 +217,43 @@ class CollectCubesEnv(DirectRLEnv):
     # ------------------------------------------------------------------ #
     # RL interface stubs
     # ------------------------------------------------------------------ #
-    def _pre_physics_step(self, actions: torch.Tensor) -> None:
-        # store actions for later use
-        self.actions = actions.clone()
+    def _pre_physics_step(self, actions: torch.Tensor):
+        # Clamp actions to [-1, 1]
+        self.actions = actions.clone().clamp(-1.0, 1.0)
+
+        targets = self.robot_dof_targets + self.robot_dof_speed_scales * self.dt * self.actions * self.cfg.action_scale
+
+        self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits * self.robot_dof_upper_limits)
 
     def _apply_action(self) -> None:
-        # no control yet; zero effort to keep simulation stable
-        if self.robot is not None:
-            zero = torch.zeros_like(self.robot.data.joint_pos)
-            self.robot.set_joint_effort_target(zero)
+        self.robot.set_joint_position_target(self.robot_dof_targets)
 
     def _get_observations(self) -> dict:
-        # return zeros until sensors or states are defined
-        obs = torch.zeros((self.num_envs, self.cfg.observation_space), device=self.device)
-        return {"policy": obs}
+        dof_pos_scaled = (
+            2.0 * (self.robot.data.joint_pos - self.robot_dof_lower_limits)
+            / (self.robot_dof_upper_limits - self.robot_dof_lower_limits)
+            - 1.0
+        )
+
+        dof_vel_scaled = self.robot.data.joint_vel * 0.1
+
+        hand_pos = self.robot.data.body_pos_w[:, self.hand_link_idx, :]
+
+        cube_pos = self.cube.data.root_pos_w
+
+        to_cube = cube_pos - hand_pos
+
+        obs = torch.cat(
+            (
+                dof_pos_scaled,  # 9
+                dof_vel_scaled,  # 9
+                to_cube,         # 3
+                cube_pos,        # 3
+            ),
+            dim=-1
+        )                        # 24
+
+        return {"policy" : torch.clamp(obs, -5.0, 5.0)}
 
     def _get_rewards(self) -> torch.Tensor:
         # simple alive reward
