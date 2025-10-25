@@ -5,7 +5,8 @@ from isaaclab.utils import configclass
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.assets import ArticulationCfg, AssetBaseCfg
+from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
+
 
 from isaaclab import sim as sim_utils
 
@@ -48,6 +49,28 @@ class CollectCubesEnvCfg(DirectRLEnvCfg):
     )
     robot_cfg.fix_base = True
     # robot_cfg.ee_frame_name = "panda_hand_tcp"
+
+
+    cube_cfg: RigidObjectCfg = RigidObjectCfg(
+        prim_path="/World/envs/env_.*/Cube",
+        spawn=sim_utils.CuboidCfg(
+            size=(0.05, 0.05, 0.05),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)),
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                static_friction=0.7, dynamic_friction=0.5, restitution=0.0
+            ),
+            rigid_props =sim_utils.RigidBodyPropertiesCfg(
+                kinematic_enabled=False,
+                disable_gravity=False,
+                solver_position_iteration_count=8,
+                solver_velocity_iteration_count=0
+            ),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=(0.5, 0.0, 0.5),
+            rot=(1.0, 0.0, 0.0, 0.0)
+        ),
+    )
 
     # scene — ONLY the supported args
     scene: InteractiveSceneCfg = InteractiveSceneCfg(

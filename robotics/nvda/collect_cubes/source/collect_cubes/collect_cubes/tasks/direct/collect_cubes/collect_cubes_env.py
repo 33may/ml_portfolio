@@ -141,7 +141,7 @@ import torch
 from collections.abc import Sequence
 
 import isaaclab.sim as sim_utils
-from isaaclab.assets import Articulation
+from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 
@@ -163,20 +163,45 @@ class CollectCubesEnv(DirectRLEnv):
     # ------------------------------------------------------------------ #
     def _setup_scene(self):
         # spawn the robot
+        # self.robot = Articulation(self.cfg.robot_cfg)
+
+        # # replicate environments
+        # self.scene.clone_environments(copy_from_source=False)
+        # if self.device == "cpu":
+        #     self.scene.filter_collisions(global_prim_paths=[])
+
+        # # register robot
+        # self.scene.articulations["robot"] = self.robot
+
+
+        # 1. create articulation
         self.robot = Articulation(self.cfg.robot_cfg)
 
-        # spawn ground and light like in tutorials
-        spawn_ground_plane(prim_path="/World/Ground", cfg=GroundPlaneCfg())
-        light_cfg = sim_utils.DomeLightCfg(intensity=3000.0, color=(0.8, 0.8, 0.8))
-        light_cfg.func("/World/Light", light_cfg)
+        # spawn cube
+        self.cube = RigidObject(self.cfg.cube_cfg)
 
-        # replicate environments
+        # 2. Spawn ground plane
+
+        spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
+
+        # 3. Clone envs
         self.scene.clone_environments(copy_from_source=False)
+
+
         if self.device == "cpu":
+
+            print(33)
+
             self.scene.filter_collisions(global_prim_paths=[])
 
-        # register robot
+        
+        # 4. Register articulation robot
         self.scene.articulations["robot"] = self.robot
+        self.scene.rigid_objects["cube"] = self.cube
+
+        # 5. Add lights
+        light_cfg = sim_utils.DomeLightCfg(intensity=3000.0, color=(0.75, 0.75, 0.75))
+        light_cfg.func("/World/Light", light_cfg)
 
     # ------------------------------------------------------------------ #
     # RL interface stubs
