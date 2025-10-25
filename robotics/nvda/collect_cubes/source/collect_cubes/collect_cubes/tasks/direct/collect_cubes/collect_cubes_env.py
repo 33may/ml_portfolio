@@ -141,7 +141,7 @@ import torch
 from collections.abc import Sequence
 
 import isaaclab.sim as sim_utils
-from isaaclab.assets import Articulation, RigidObject
+from isaaclab.assets import Articulation, RigidObject, AssetBaseCfg
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 
@@ -196,21 +196,29 @@ class CollectCubesEnv(DirectRLEnv):
         # spawn cube
         self.cube = RigidObject(self.cfg.cube_cfg)
 
-        self.bucket = RigidObject(self.cfg.bucket_cfg)
+        # spawn bucket components (5 cuboids)
+        self.bucket_floor = RigidObject(self.cfg.bucket_floor_cfg)
+        self.bucket_wall_left = RigidObject(self.cfg.bucket_wall_left_cfg)
+        self.bucket_wall_right = RigidObject(self.cfg.bucket_wall_right_cfg)
+        self.bucket_wall_front = RigidObject(self.cfg.bucket_wall_front_cfg)
+        self.bucket_wall_back = RigidObject(self.cfg.bucket_wall_back_cfg)
 
         # 2. Spawn ground plane
-
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
 
-        # 3. Clone envs
+        # 4. Clone envs
         self.scene.clone_environments(copy_from_source=False)
-        
-        # 4. Register articulation robot
+
+        # 5. Register articulation robot and rigid objects
         self.scene.articulations["robot"] = self.robot
         self.scene.rigid_objects["cube"] = self.cube
-        self.scene.rigid_objects["bucket"] = self.bucket
+        self.scene.rigid_objects["bucket_floor"] = self.bucket_floor
+        self.scene.rigid_objects["bucket_wall_left"] = self.bucket_wall_left
+        self.scene.rigid_objects["bucket_wall_right"] = self.bucket_wall_right
+        self.scene.rigid_objects["bucket_wall_front"] = self.bucket_wall_front
+        self.scene.rigid_objects["bucket_wall_back"] = self.bucket_wall_back
 
-        # 5. Add lights
+        # 6. Add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=3000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 

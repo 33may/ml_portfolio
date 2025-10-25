@@ -70,24 +70,18 @@ class CollectCubesEnvCfg(DirectRLEnvCfg):
         ),
     )
 
-    # Bucket/container for collecting cubes
-    bucket_cfg: RigidObjectCfg = RigidObjectCfg(
-        prim_path="/World/envs/env_.*/Bucket",
+    # Bucket components (5 cuboids: floor + 4 walls)
+    bucket_floor_cfg: RigidObjectCfg = RigidObjectCfg(
+        prim_path="/World/envs/env_.*/BucketFloor",
         spawn=sim_utils.CuboidCfg(
-            size=(0.3, 0.3, 0.15),
-            visual_material=sim_utils.PreviewSurfaceCfg(
-                diffuse_color=(0.3, 0.8, 0.3),
-                metallic=0.0,
-                roughness=0.4,
-            ),
+            size=(0.25, 0.25, 0.01),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.3, 0.3, 0.3)),
             physics_material=sim_utils.RigidBodyMaterialCfg(
-                static_friction=0.8,
-                dynamic_friction=0.6,
-                restitution=0.0,
+                static_friction=0.7, dynamic_friction=0.5, restitution=0.0
             ),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                kinematic_enabled=True,  # ← Неподвижная корзина!
-                disable_gravity=True,     # ← Не падает
+                kinematic_enabled=True,
+                disable_gravity=True,
             ),
             collision_props=sim_utils.CollisionPropertiesCfg(
                 contact_offset=0.005,
@@ -95,8 +89,100 @@ class CollectCubesEnvCfg(DirectRLEnvCfg):
             ),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(0.6, 0.3, 0.075),  # Справа от робота, на высоте половины высоты (7.5см)
-            rot=(1.0, 0.0, 0.0, 0.0),
+            pos=(0.5, 0.5, 0.005),
+            rot=(1.0, 0.0, 0.0, 0.0)
+        ),
+    )
+
+    bucket_wall_left_cfg: RigidObjectCfg = RigidObjectCfg(
+        prim_path="/World/envs/env_.*/BucketWallLeft",
+        spawn=sim_utils.CuboidCfg(
+            size=(0.01, 0.25, 0.12),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.2, 0.4, 0.8)),
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                static_friction=0.7, dynamic_friction=0.5, restitution=0.0
+            ),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                kinematic_enabled=True,
+                disable_gravity=True,
+            ),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                contact_offset=0.005,
+                rest_offset=0.0,
+            ),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=(0.5 - 0.125, 0.5, 0.07),
+            rot=(1.0, 0.0, 0.0, 0.0)
+        ),
+    )
+
+    bucket_wall_right_cfg: RigidObjectCfg = RigidObjectCfg(
+        prim_path="/World/envs/env_.*/BucketWallRight",
+        spawn=sim_utils.CuboidCfg(
+            size=(0.01, 0.25, 0.12),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.2, 0.4, 0.8)),
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                static_friction=0.7, dynamic_friction=0.5, restitution=0.0
+            ),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                kinematic_enabled=True,
+                disable_gravity=True,
+            ),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                contact_offset=0.005,
+                rest_offset=0.0,
+            ),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=(0.5 + 0.125, 0.5, 0.07),
+            rot=(1.0, 0.0, 0.0, 0.0)
+        ),
+    )
+
+    bucket_wall_front_cfg: RigidObjectCfg = RigidObjectCfg(
+        prim_path="/World/envs/env_.*/BucketWallFront",
+        spawn=sim_utils.CuboidCfg(
+            size=(0.25, 0.01, 0.12),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.2, 0.4, 0.8)),
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                static_friction=0.7, dynamic_friction=0.5, restitution=0.0
+            ),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                kinematic_enabled=True,
+                disable_gravity=True,
+            ),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                contact_offset=0.005,
+                rest_offset=0.0,
+            ),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=(0.5, 0.5 - 0.125, 0.07),
+            rot=(1.0, 0.0, 0.0, 0.0)
+        ),
+    )
+
+    bucket_wall_back_cfg: RigidObjectCfg = RigidObjectCfg(
+        prim_path="/World/envs/env_.*/BucketWallBack",
+        spawn=sim_utils.CuboidCfg(
+            size=(0.25, 0.01, 0.12),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.2, 0.4, 0.8)),
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                static_friction=0.7, dynamic_friction=0.5, restitution=0.0
+            ),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                kinematic_enabled=True,
+                disable_gravity=True,
+            ),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                contact_offset=0.005,
+                rest_offset=0.0,
+            ),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=(0.5, 0.5 + 0.125, 0.07),
+            rot=(1.0, 0.0, 0.0, 0.0)
         ),
     )
 
