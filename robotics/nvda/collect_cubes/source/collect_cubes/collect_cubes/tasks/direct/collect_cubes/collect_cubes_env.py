@@ -264,13 +264,58 @@ class CollectCubesEnv(DirectRLEnv):
         return {"policy" : torch.clamp(obs, -5.0, 5.0)}
 
     def _get_rewards(self) -> torch.Tensor:
-        # simple alive reward
-        return torch.ones(self.num_envs, device=self.device)
+        # Get positions
+        hand_pos = self.robot.data.body_pos_w[:, self.hand_link_idx, :]
+        cube_pos = self.cube.data.root_pos_w
+        bucket_center = torch.tensor([0.5, 0.5, 0.05], device=self.device).repeat(self.num_envs, 1)
+
+        # Distance from hand to cube (encourage reaching)
+        dist_hand_to_cube = torch.norm(hand_pos - cube_pos, dim=-1)
+        reward_reach = -dist_hand_to_cube * 0.5
+
+        # Distance from cube to bucket center (encourage moving cube to bucket)
+        dist_cube_to_bucket = torch.norm(cube_pos[:, :2] - bucket_center[:, :2], dim=-1)
+        reward_cube_to_bucket = -dist_cube_to_bucket * 2.0
+
+        # Check if cube is inside bucket
+        bucket_x_min, bucket_x_max = 0.5 - 0.115, 0.5 + 0.115  # ~23cm inner width
+        bucket_y_min, bucket_y_max = 0.5 - 0.115, 0.5 + 0.115
+        bucket_z_min, bucket_z_max = 0.01, 0.13  # floor to wall height
+
+        in_bucket_x = (cube_pos[:, 0] > bucket_x_min) & (cube_pos[:, 0] < bucket_x_max)
+        in_bucket_y = (cube_pos[:, 1] > bucket_y_min) & (cube_pos[:, 1] < bucket_y_max)
+        in_bucket_z = (cube_pos[:, 2] > bucket_z_min) & (cube_pos[:, 2] < bucket_z_max)
+        cube_in_bucket = in_bucket_x & in_bucket_y & in_bucket_z
+
+        reward_in_bucket = cube_in_bucket.float() * 100.0
+
+        # Small time penalty to encourage faster completion
+        reward_time = -0.01
+
+        total_reward = reward_reach + reward_cube_to_bucket + reward_in_bucket + reward_time
+
+        return total_reward
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
-        # never terminate for now
-        done = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        # Get cube position
+        cube_pos = self.cube.data.root_pos_w
+
+        # Check if cube is inside bucket (success condition)
+        bucket_x_min, bucket_x_max = 0.5 - 0.115, 0.5 + 0.115
+        bucket_y_min, bucket_y_max = 0.5 - 0.115, 0.5 + 0.115
+        bucket_z_min, bucket_z_max = 0.01, 0.13
+
+        in_bucket_x = (cube_pos[:, 0] > bucket_x_min) & (cube_pos[:, 0] < bucket_x_max)
+        in_bucket_y = (cube_pos[:, 1] > bucket_y_min) & (cube_pos[:, 1] < bucket_y_max)
+        in_bucket_z = (cube_pos[:, 2] > bucket_z_min) & (cube_pos[:, 2] < bucket_z_max)
+        cube_in_bucket = in_bucket_x & in_bucket_y & in_bucket_z
+
+        # Terminate if cube successfully placed in bucket
+        done = cube_in_bucket
+
+        # Standard timeout
         timeout = self.episode_length_buf >= self.max_episode_length - 1
+
         return done, timeout
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
