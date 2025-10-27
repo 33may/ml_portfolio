@@ -196,12 +196,14 @@ class CollectCubesEnv(DirectRLEnv):
         # spawn cube
         self.cube = RigidObject(self.cfg.cube_cfg)
 
+
         # spawn bucket components (5 cuboids)
         self.bucket_floor = RigidObject(self.cfg.bucket_floor_cfg)
         self.bucket_wall_left = RigidObject(self.cfg.bucket_wall_left_cfg)
         self.bucket_wall_right = RigidObject(self.cfg.bucket_wall_right_cfg)
         self.bucket_wall_front = RigidObject(self.cfg.bucket_wall_front_cfg)
         self.bucket_wall_back = RigidObject(self.cfg.bucket_wall_back_cfg)
+
 
         # 2. Spawn ground plane
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
