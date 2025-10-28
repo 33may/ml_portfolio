@@ -14,6 +14,7 @@ import isaaclab.sim as sim_utils
 
 # from . import mdp
 import isaaclab_tasks.manager_based.manipulation.lift.mdp as mdp
+import SO_100.tasks.lift.mdp as custom_mdp
 from isaaclab.assets import (
     ArticulationCfg,
     AssetBaseCfg,
@@ -93,7 +94,7 @@ class CommandsCfg:
         asset_name="robot",
         body_name=MISSING,  # will be set by agent env cfg
         resampling_time_range=(5.0, 5.0),
-        debug_vis=True,
+        debug_vis=False,  # Disabled - only show end-effector frame
         ranges=mdp.UniformPoseCommandCfg.Ranges(
             pos_x=(-0.1, 0.1),
             pos_y=(-0.3, -0.1),
@@ -159,26 +160,32 @@ class RewardsCfg:
 
     reaching_object = RewTerm(func=mdp.object_ee_distance, params={"std": 0.05}, weight=1.0)
 
-    lifting_object = RewTerm(func=mdp.object_is_lifted, params={"minimal_height": 0.04}, weight=15.0)
+    lifting_object = RewTerm(func=mdp.object_is_lifted, params={"minimal_height": 0.03}, weight=80.0)
 
     object_goal_tracking = RewTerm(
         func=mdp.object_goal_distance,
-        params={"std": 0.3, "minimal_height": 0.04, "command_name": "object_pose"},
-        weight=16.0,
+        params={"std": 0.3, "minimal_height": 0.03, "command_name": "object_pose"},
+        weight=40.0,
     )
 
     object_goal_tracking_fine_grained = RewTerm(
         func=mdp.object_goal_distance,
-        params={"std": 0.05, "minimal_height": 0.04, "command_name": "object_pose"},
-        weight=5.0,
+        params={"std": 0.05, "minimal_height": 0.03, "command_name": "object_pose"},
+        weight=15.0,
     )
 
-    # action penalty
-    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-1e-4)
+    # gripper orientation reward (looking straight down for top-down grasping)
+    gripper_orientation = RewTerm(
+        func=custom_mdp.gripper_orientation_alignment,
+        weight=0.1,
+    )
+
+    # action penalty (fixed weights, no curriculum)
+    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
 
     joint_vel = RewTerm(
         func=mdp.joint_vel_l2,
-        weight=-1e-4,
+        weight=-0.01,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
 
@@ -198,13 +205,17 @@ class TerminationsCfg:
 class CurriculumCfg:
     """Curriculum terms for the MDP."""
 
-    action_rate = CurrTerm(
-        func=mdp.modify_reward_weight, params={"term_name": "action_rate", "weight": -1e-1, "num_steps": 10000}
-    )
+    # DISABLED: Curriculum was causing reward explosions
+    # Keep penalties constant throughout training
+    pass
 
-    joint_vel = CurrTerm(
-        func=mdp.modify_reward_weight, params={"term_name": "joint_vel", "weight": -1e-1, "num_steps": 10000}
-    )
+    # action_rate = CurrTerm(
+    #     func=mdp.modify_reward_weight, params={"term_name": "action_rate", "weight": -5e-3, "num_steps": 10000}
+    # )
+
+    # joint_vel = CurrTerm(
+    #     func=mdp.modify_reward_weight, params={"term_name": "joint_vel", "weight": -5e-3, "num_steps": 10000}
+    # )
 
 
 ##
@@ -234,9 +245,10 @@ class LiftEnvCfg(ManagerBasedRLEnvCfg):
         self.decimation = 2
         self.episode_length_s = 5.0
         self.viewer.eye = (2.5, 2.5, 1.5)
+        self.viewer.lookat = (0.0, 0.0, 0.0)  # Focus on env_0 area
         # simulation settings
         self.sim.dt = 0.01  # 100Hz
-        self.sim.render_interval = self.decimation
+        self.sim.render_interval = self.decimation  # Render every 10th decimated step for performance
 
         self.sim.physx.bounce_threshold_velocity = 0.2
         self.sim.physx.bounce_threshold_velocity = 0.01

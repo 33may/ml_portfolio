@@ -86,3 +86,49 @@ def object_ee_distance_and_lifted(
     lift_reward = object_is_lifted(env, minimal_height, object_cfg)
     # Combine rewards multiplicatively
     return reach_reward * lift_reward
+
+
+def gripper_orientation_alignment(
+    env: ManagerBasedRLEnv,
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
+) -> torch.Tensor:
+    """Reward the gripper for pointing straight down (perpendicular to ground).
+
+    This encourages top-down grasping by rewarding when the gripper's Z-axis points downward.
+    Uses a smooth reward function that provides gradient information at all orientations.
+
+    Args:
+        env: The environment.
+        ee_frame_cfg: End-effector frame configuration.
+
+    Returns:
+        Reward value between 0.0 and 1.0, where 1.0 means perfectly vertical (looking straight down).
+    """
+    # Extract end-effector frame
+    ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
+
+    # Get end-effector orientation (quaternion): (num_envs, 4) - [w, x, y, z]
+    ee_quat_w = ee_frame.data.target_quat_w[..., 0, :]
+
+    # Convert quaternion to rotation matrix and extract Z-axis (third column)
+    # For quaternion [w, x, y, z], the Z-axis of the frame is:
+    # z_axis = [2*(x*z + w*y), 2*(y*z - w*x), 1 - 2*(x^2 + y^2)]
+    w, x, y, z = ee_quat_w[:, 0], ee_quat_w[:, 1], ee_quat_w[:, 2], ee_quat_w[:, 3]
+
+    # Z-axis of the gripper in world frame
+    gripper_z_x = 2 * (x * z + w * y)
+    gripper_z_y = 2 * (y * z - w * x)
+    gripper_z_z = 1 - 2 * (x * x + y * y)
+
+    # World Z-axis pointing down (for top-down grasping)
+    world_down = torch.tensor([0.0, 0.0, -1.0], device=env.device)
+
+    # Compute dot product between gripper Z-axis and downward direction
+    # Values: 1.0 = perfectly vertical (down), 0.0 = horizontal, -1.0 = pointing up
+    alignment = gripper_z_x * world_down[0] + gripper_z_y * world_down[1] + gripper_z_z * world_down[2]
+
+    # Invert and map to [0, 1]: 1.0 when pointing down, 0.0 when pointing up
+    # The negative sign inverts the alignment (gripper Z-axis points opposite to expected)
+    reward = (-alignment + 1.0) / 2.0
+
+    return reward

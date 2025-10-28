@@ -9,7 +9,9 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import isaaclab_tasks.manager_based.manipulation.lift.mdp as mdp
+import SO_100.tasks.lift.mdp as custom_mdp
 from isaaclab.assets import RigidObjectCfg
+from isaaclab.managers import RewardTermCfg as RewTerm
 
 # from isaaclab.managers NotImplementedError
 from isaaclab.sensors.frame_transformer.frame_transformer_cfg import (
@@ -42,18 +44,18 @@ class SoArm100LiftCubeEnvCfg(LiftEnvCfg):
         # override actions
         self.actions.arm_action = mdp.JointPositionActionCfg(
             asset_name="robot",
-            joint_names=["Shoulder_Rotation", "Shoulder_Pitch", "Elbow", "Wrist_Pitch", "Wrist_Roll"],
+            joint_names=["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"],
             scale=0.5,
             use_default_offset=True,
         )
         self.actions.gripper_action = mdp.BinaryJointPositionActionCfg(
             asset_name="robot",
-            joint_names=["Gripper"],
-            open_command_expr={"Gripper": 0.5},
-            close_command_expr={"Gripper": 0.0},
+            joint_names=["gripper"],
+            open_command_expr={"gripper": 0.5},
+            close_command_expr={"gripper": 0.0},
         )
         # Set the body name for the end effector
-        self.commands.object_pose.body_name = ["Fixed_Gripper"]
+        self.commands.object_pose.body_name = ["gripper_link"]
 
         # Set Cube as object
         self.scene.object = RigidObjectCfg(
@@ -78,15 +80,15 @@ class SoArm100LiftCubeEnvCfg(LiftEnvCfg):
         marker_cfg.markers["frame"].scale = (0.05, 0.05, 0.05)
         marker_cfg.prim_path = "/Visuals/FrameTransformer"
         self.scene.ee_frame = FrameTransformerCfg(
-            prim_path="{ENV_REGEX_NS}/Robot/Base",
-            debug_vis=False,
+            prim_path="{ENV_REGEX_NS}/Robot/base_link",
+            debug_vis=True,  # ENABLED: You'll see colored axes showing the target point
             visualizer_cfg=marker_cfg,
             target_frames=[
                 FrameTransformerCfg.FrameCfg(
-                    prim_path="{ENV_REGEX_NS}/Robot/Fixed_Gripper",
+                    prim_path="{ENV_REGEX_NS}/Robot/gripper_link",
                     name="end_effector",
                     offset=OffsetCfg(
-                        pos=[0.01, 0.0, 0.1],
+                        pos=[0.0, 0.0, -0.08],
                     ),
                 ),
             ],

@@ -22,13 +22,16 @@ class LiftCubePPORunnerCfg(RslRlOnPolicyRunnerCfg):
     max_iterations = 1500
     save_interval = 50
     experiment_name = "lift"
-    empirical_normalization = False
+    empirical_normalization = True  # ENABLED: Helps stabilize training with large observations
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=1.0,
         actor_hidden_dims=[256, 128, 64],
         critic_hidden_dims=[256, 128, 64],
         activation="elu",
     )
+    # Add observation clipping to prevent explosions
+    # This clips normalized observations to [-10, 10] range
+    clip_observations = 10.0
     algorithm = RslRlPpoAlgorithmCfg(
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
@@ -36,10 +39,12 @@ class LiftCubePPORunnerCfg(RslRlOnPolicyRunnerCfg):
         entropy_coef=0.006,
         num_learning_epochs=5,
         num_mini_batches=4,
-        learning_rate=1.0e-4,
+        learning_rate=5.0e-5,  # Reduced for stability
         schedule="adaptive",
         gamma=0.98,
         lam=0.95,
         desired_kl=0.01,
         max_grad_norm=1.0,
     )
+    # Clip rewards to prevent explosions
+    clip_rewards = 100.0  # Clip rewards to [-100, 100] range

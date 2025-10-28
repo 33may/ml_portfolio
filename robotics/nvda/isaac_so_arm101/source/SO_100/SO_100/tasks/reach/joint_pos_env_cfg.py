@@ -38,22 +38,22 @@ class SoArm100ReachEnvCfg(ReachEnvCfg):
         # switch robot to franka
         self.scene.robot = SO_ARM100_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
         # override rewards
-        self.rewards.end_effector_position_tracking.params["asset_cfg"].body_names = ["Fixed_Gripper"]
-        self.rewards.end_effector_position_tracking_fine_grained.params["asset_cfg"].body_names = ["Fixed_Gripper"]
-        self.rewards.end_effector_orientation_tracking.params["asset_cfg"].body_names = ["Fixed_Gripper"]
+        self.rewards.end_effector_position_tracking.params["asset_cfg"].body_names = ["gripper_link"]
+        self.rewards.end_effector_position_tracking_fine_grained.params["asset_cfg"].body_names = ["gripper_link"]
+        self.rewards.end_effector_orientation_tracking.params["asset_cfg"].body_names = ["gripper_link"]
 
         # TODO: reorient command target
 
         # override actions
         self.actions.arm_action = mdp.JointPositionActionCfg(
             asset_name="robot",
-            joint_names=["Shoulder_Rotation", "Shoulder_Pitch", "Elbow", "Wrist_Pitch", "Wrist_Roll"],
+            joint_names=["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"],
             scale=0.5,
             use_default_offset=True,
         )
         # override command generator body
         # end-effector is along z-direction
-        self.commands.ee_pose.body_name = ["Fixed_Gripper"]
+        self.commands.ee_pose.body_name = ["gripper_link"]
         # self.commands.ee_pose.ranges.pitch = (math.pi, math.pi)
 
 
