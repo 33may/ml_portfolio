@@ -95,6 +95,7 @@ class SoArm100LiftCubeEnvCfg(LiftEnvCfg):
         )
 
 
+
 @configclass
 class SoArm100LiftCubeEnvCfg_PLAY(SoArm100LiftCubeEnvCfg):
     def __post_init__(self):
