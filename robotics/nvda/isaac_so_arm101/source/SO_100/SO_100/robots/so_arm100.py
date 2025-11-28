@@ -23,6 +23,8 @@ from isaaclab.assets.articulation import ArticulationCfg
 
 TEMPLATE_ASSETS_DATA_DIR = "/home/may33/projects/ml_portfolio/robotics/robots/SO-ARM100"
 
+file_name = "convex_fripper_robot.usd"
+
 ##
 # Configuration
 ##
@@ -30,7 +32,7 @@ TEMPLATE_ASSETS_DATA_DIR = "/home/may33/projects/ml_portfolio/robotics/robots/SO
 
 SO_ARM100_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
-        usd_path=f"{TEMPLATE_ASSETS_DATA_DIR}/so101_prepared_v2.usd",
+        usd_path=f"{TEMPLATE_ASSETS_DATA_DIR}/{file_name}",
         activate_contact_sensors=False,  # Adjust based on need
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,

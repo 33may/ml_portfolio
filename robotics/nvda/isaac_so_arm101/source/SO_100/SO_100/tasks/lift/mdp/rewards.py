@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import torch
-from isaaclab.assets import RigidObject
+from isaaclab.assets import Articulation, RigidObject
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import FrameTransformer
 from isaaclab.utils.math import combine_frame_transforms
@@ -130,5 +130,101 @@ def gripper_orientation_alignment(
     # Invert and map to [0, 1]: 1.0 when pointing down, 0.0 when pointing up
     # The negative sign inverts the alignment (gripper Z-axis points opposite to expected)
     reward = (-alignment + 1.0) / 2.0
+
+    return reward
+
+
+def gripper_close_when_near_object(
+    env: ManagerBasedRLEnv,
+    distance_threshold: float = 0.05,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Reward closing the gripper when the object is within reach (< 5cm).
+
+    This encourages the robot to actually grasp the object after positioning near it.
+
+    Args:
+        env: The environment.
+        distance_threshold: Maximum distance (in meters) to trigger reward. Default 0.05m (5cm).
+        object_cfg: Object configuration.
+        ee_frame_cfg: End-effector frame configuration.
+        robot_cfg: Robot configuration.
+
+    Returns:
+        Reward value between 0.0 and 1.0, where 1.0 means gripper is closed when object is very close.
+    """
+    # Extract entities
+    object: RigidObject = env.scene[object_cfg.name]
+    ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
+    robot: Articulation = env.scene[robot_cfg.name]
+
+    # Object position: (num_envs, 3)
+    cube_pos_w = object.data.root_pos_w
+    # End-effector position: (num_envs, 3)
+    ee_w = ee_frame.data.target_pos_w[..., 0, :]
+    # Distance of the end-effector to the object: (num_envs,)
+    object_ee_distance = torch.norm(cube_pos_w - ee_w, dim=1)
+
+    # Check if object is within reach (< 5cm)
+    is_near = object_ee_distance < distance_threshold
+
+    # Get gripper joint position (assuming joint name is "gripper")
+    # Lower values mean more closed
+    gripper_joint_idx = robot.joint_names.index("gripper")
+    gripper_pos = robot.data.joint_pos[:, gripper_joint_idx]
+
+    # Gripper closedness: 1.0 = fully closed (0.0), 0.0 = fully open (0.5)
+    # Assuming gripper range is [0.0, 0.5] based on the config
+    gripper_closedness = 1.0 - (gripper_pos / 0.5)
+    # gripper_closedness = torch.clamp(gripper_closedness, 0.0, 1.0)
+
+    # Reward closing gripper only when object is near
+    reward = torch.where(is_near, gripper_closedness, torch.zeros_like(gripper_closedness))
+
+    return reward
+
+
+def lift_when_gripper_closed(
+    env: ManagerBasedRLEnv,
+    gripper_close_threshold: float = 0.15,
+    minimal_height: float = 0.01,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Reward lifting the object when the gripper is closed enough.
+
+    This encourages the robot to lift after grasping by only rewarding height when gripper is sufficiently closed.
+
+    Args:
+        env: The environment.
+        gripper_close_threshold: Maximum gripper position to consider "closed" (default 0.15).
+        minimal_height: Minimum height above ground to start rewarding (default 0.03m).
+        object_cfg: Object configuration.
+        robot_cfg: Robot configuration.
+
+    Returns:
+        Reward value based on object height when gripper is closed, 0.0 otherwise.
+    """
+    # Extract entities
+    object: RigidObject = env.scene[object_cfg.name]
+    robot: Articulation = env.scene[robot_cfg.name]
+
+    # Get gripper joint position
+    gripper_joint_idx = robot.joint_names.index("gripper")
+    gripper_pos = robot.data.joint_pos[:, gripper_joint_idx]
+
+    # Check if gripper is closed enough
+    is_closed = gripper_pos < gripper_close_threshold
+
+    # Get object height
+    object_height = object.data.root_pos_w[:, 2]
+
+    # Normalized height reward: 0 at minimal_height, 1 at 0.5m
+    height_reward = torch.clamp((object_height - minimal_height) / 0.5, 0.0, 1.0)
+
+    # Only reward lifting when gripper is closed
+    reward = torch.where(is_closed, height_reward, torch.zeros_like(height_reward))
 
     return reward

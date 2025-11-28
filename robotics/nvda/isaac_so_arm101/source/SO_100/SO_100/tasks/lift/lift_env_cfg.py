@@ -143,15 +143,17 @@ class EventCfg:
 
     reset_all = EventTerm(func=mdp.reset_scene_to_default, mode="reset")
 
-    reset_object_position = EventTerm(
-        func=mdp.reset_root_state_uniform,
-        mode="reset",
-        params={
-            "pose_range": {"x": (-0.1, 0.1), "y": (-0.2, 0.2), "z": (0.0, 0.0)},
-            "velocity_range": {},
-            "asset_cfg": SceneEntityCfg("object", body_names="Object"),
-        },
-    )
+    # randomize object
+
+    # reset_object_position = EventTerm(
+    #     func=mdp.reset_root_state_uniform,
+    #     mode="reset",
+    #     params={
+    #         "pose_range": {"x": (-0.1, 0.1), "y": (-0.2, 0.2), "z": (0.0, 0.0)},
+    #         "velocity_range": {},
+    #         "asset_cfg": SceneEntityCfg("object", body_names="Object"),
+    #     },
+    # )
 
 
 @configclass
@@ -177,7 +179,14 @@ class RewardsCfg:
     # gripper orientation reward (looking straight down for top-down grasping)
     gripper_orientation = RewTerm(
         func=custom_mdp.gripper_orientation_alignment,
-        weight=0.1,
+        weight=1,
+    )
+
+    # gripper closing reward when object is within 5cm
+    gripper_close_near_object = RewTerm(
+        func=custom_mdp.gripper_close_when_near_object,
+        params={"distance_threshold": 0.01},
+        weight=1,
     )
 
     # action penalty (fixed weights, no curriculum)

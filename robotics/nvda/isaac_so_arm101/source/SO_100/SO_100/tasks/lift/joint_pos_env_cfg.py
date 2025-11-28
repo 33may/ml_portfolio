@@ -27,6 +27,8 @@ from SO_100.tasks.lift.lift_env_cfg import LiftEnvCfg
 
 from isaaclab.markers.config import FRAME_MARKER_CFG  # isort: skip
 
+import numpy as np
+
 # ----------------------------------------------------------------
 # --------------- LycheeAI live asset ----------------------------
 # ----------------------------------------------------------------
@@ -57,13 +59,17 @@ class SoArm100LiftCubeEnvCfg(LiftEnvCfg):
         # Set the body name for the end effector
         self.commands.object_pose.body_name = ["gripper_link"]
 
+        # cube_position = [np.random.uniform(0.2, 0.3), np.random.uniform(-0.15, 0.15), 0.07]
+
+        cube_position = [0.23,0.1,0.07]
+
         # Set Cube as object
         self.scene.object = RigidObjectCfg(
             prim_path="{ENV_REGEX_NS}/Object",
-            init_state=RigidObjectCfg.InitialStateCfg(pos=[0.2, 0.0, 0.015], rot=[1, 0, 0, 0]),
+            init_state=RigidObjectCfg.InitialStateCfg(pos=cube_position, rot=[1, 0, 0, 0]),
             spawn=UsdFileCfg(
                 usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd",
-                scale=(0.3, 0.3, 0.3),
+                scale=(0.2, 0.2, 0.2),
                 rigid_props=RigidBodyPropertiesCfg(
                     solver_position_iteration_count=16,
                     solver_velocity_iteration_count=1,
@@ -88,7 +94,7 @@ class SoArm100LiftCubeEnvCfg(LiftEnvCfg):
                     prim_path="{ENV_REGEX_NS}/Robot/gripper_link",
                     name="end_effector",
                     offset=OffsetCfg(
-                        pos=[0.0, 0.0, -0.08],
+                        pos=[0.0, 0.0, -0.1],
                     ),
                 ),
             ],
